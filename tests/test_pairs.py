@@ -37,9 +37,9 @@ def test_leakage_is_excluded_by_default(seed_brews):
     without, stats = build_pairs(seed_brews)
 
     leaky = [p for p in with_leaky if p.leaky]
-    assert len(leaky) == stats.leaky_excluded
-    assert len(without) == len(with_leaky) - len(leaky)
-    # Roughly 8% of otherwise-usable pairs state the answer in the input.
+    assert len(leaky) == stats.leaky_excluded == 40
+    assert len(without) == len(with_leaky) - len(leaky) == 332
+    # Roughly a tenth of otherwise-usable pairs state the answer in the input.
     assert 0.05 < len(leaky) / len(with_leaky) < 0.15
     assert all(not p.leaky for p in without)
     assert leaky_stats.leaky_excluded == 0

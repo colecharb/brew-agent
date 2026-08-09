@@ -78,20 +78,22 @@ class PairStats:
     per_user: dict[str, int] = field(default_factory=dict)
 
     def funnel_lines(self) -> list[str]:
-        return [
-            f"  brews scanned                {self.total_brews:5d}",
-            f"  consecutive same user+coffee {self.consecutive:5d}",
-            f"  + earlier brew has notes     {self.with_notes:5d}",
-            f"  + same grinder               {self.same_grinder:5d}",
-            f"  + same brewer                {self.same_brewer:5d}",
-            f"  + both rated                 {self.both_rated:5d}",
-            f"  + numeric grind both sides   {self.numeric_grind:5d}",
-            f"  + no scale jump (>{MAX_GRIND_RATIO:g}x)      {self.within_scale:5d}",
-            f"  + something actually changed {self.something_changed:5d}",
-            f"  - answer leaked in notes     {self.leaky_excluded:5d}",
-            f"  = eligible pairs             {self.eligible:5d}"
-            f"  ({self.users_sampled} users sampled)",
+        steps = [
+            ("brews scanned", self.total_brews),
+            ("consecutive same user+coffee", self.consecutive),
+            ("+ earlier brew has notes", self.with_notes),
+            ("+ same grinder", self.same_grinder),
+            ("+ same brewer", self.same_brewer),
+            ("+ both rated", self.both_rated),
+            ("+ numeric grind both sides", self.numeric_grind),
+            (f"+ no unit change (>{MAX_GRIND_RATIO:g}x jump)", self.within_scale),
+            ("+ something actually changed", self.something_changed),
+            ("- answer leaked in notes", self.leaky_excluded),
+            ("= eligible pairs", self.eligible),
+            (f"sampled across {self.users_sampled} users", self.sampled),
         ]
+        width = max(len(label) for label, _ in steps)
+        return [f"  {label:<{width}} {count:5d}" for label, count in steps]
 
 
 def _changed(before: Brew, after: Brew) -> bool:
