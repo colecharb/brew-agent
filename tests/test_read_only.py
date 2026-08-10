@@ -47,3 +47,28 @@ def test_the_guard_actually_catches_a_write(tmp_path):
     assert WRITE_CALLS.search('client.table("brew").delete().eq("id", x)')
     assert WRITE_CALLS.search('client.rpc("log_brew", params)')
     assert not WRITE_CALLS.search('client.table("brew").select(SELECT)')
+
+
+# Redaction only holds if nothing routes around it. `pair.complaint` is the
+# redacted text; `pair.before.notes` is the original, stated adjustment and all.
+# An arm reading the latter would quietly hand itself the answer — and only that
+# arm, which is the worst version of the failure since it skews a comparison.
+RAW_NOTES = re.compile(r"\.before\.notes\b")
+
+# pairs.py is where redaction happens, so it is the one place that reads the
+# original text.
+REDACTION_OWNER = "pairs.py"
+
+
+@pytest.mark.parametrize(
+    "path", [p for p in _source_files() if p.name != REDACTION_OWNER], ids=lambda p: p.name
+)
+def test_nothing_bypasses_redaction(path):
+    offenders = [
+        f"{path.name}:{number}: {line.strip()}"
+        for number, line in enumerate(path.read_text().splitlines(), start=1)
+        if RAW_NOTES.search(line.split("#", 1)[0])
+    ]
+    assert not offenders, (
+        "read pair.complaint, not the unredacted notes:\n" + "\n".join(offenders)
+    )

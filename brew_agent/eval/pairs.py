@@ -76,6 +76,43 @@ LEAK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# How a stated adjustment is handled. Redaction is the default: it keeps the
+# pair, and it is mechanical rather than a request, so it applies identically to
+# every arm. Telling a model to "disregard" a phrase it has already read cannot
+# be verified, and would only bind the arms that can read it — the keyword table
+# is immune either way, so the honour system would flatter exactly what is under
+# test.
+REDACT = "redact"  # cut the leaking sentence, keep the pair. The measurement.
+EXCLUDE = "exclude"  # drop the pair. Conservative cross-check.
+RAW = "raw"  # leave it in. Harness self-test: note-reading arms should ace it.
+LEAK_MODES = (REDACT, EXCLUDE, RAW)
+
+# Sentence boundaries, plus newlines — plenty of notes are line-separated
+# fragments with no terminal punctuation at all.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
+
+
+def redact_leaks(notes: str) -> tuple[str, list[str]]:
+    """Remove whole sentences that state an adjustment.
+
+    By sentence rather than by span: cutting mid-sentence leaves a fragment that
+    is both unreadable and still suggestive ("Still a touch bitter. Could nudge
+    probably" gives the game away almost as well as the original).
+
+    Taste evidence and the stated adjustment usually sit in separate sentences,
+    so the cut is clean:
+
+        "Body and zing both! My guess is that maybe 5-10 um coarser could open
+        this brew up"  ->  "Body and zing both!"
+    """
+    kept, removed = [], []
+    for sentence in _SENTENCE_SPLIT.split(notes):
+        if not sentence.strip():
+            continue
+        (removed if LEAK_PATTERN.search(sentence) else kept).append(sentence.strip())
+    return " ".join(kept), removed
+
+
 # Guard against a pair whose two settings were logged in different units, which
 # would make the delta meaningless. It catches nothing in the current seed data
 # — once the brewer is pinned, the widest real jump is exactly 5x (a 50 -> 250
@@ -98,13 +135,23 @@ class PairStats:
     numeric_grind: int = 0
     within_scale: int = 0
     something_changed: int = 0
+    leak_mode: str = REDACT
+    leaky_detected: int = 0
     leaky_excluded: int = 0
+    redacted_to_nothing: int = 0
     eligible: int = 0
     sampled: int = 0
     users_sampled: int = 0
     per_user: dict[str, int] = field(default_factory=dict)
 
     def funnel_lines(self) -> list[str]:
+        if self.leak_mode == EXCLUDE:
+            leak_step = ("- states an adjustment (excluded)", self.leaky_excluded)
+        elif self.leak_mode == RAW:
+            leak_step = ("! states an adjustment (LEFT IN)", self.leaky_detected)
+        else:
+            leak_step = ("- redacted away to nothing", self.redacted_to_nothing)
+
         steps = [
             ("brews scanned", self.total_brews),
             ("consecutive same user+coffee", self.consecutive),
@@ -115,7 +162,8 @@ class PairStats:
             ("+ numeric grind both sides", self.numeric_grind),
             (f"+ no unit change (>{MAX_GRIND_RATIO:g}x jump)", self.within_scale),
             ("+ something actually changed", self.something_changed),
-            ("- answer leaked in notes", self.leaky_excluded),
+            ("  of which state an adjustment", self.leaky_detected),
+            leak_step,
             ("= eligible pairs", self.eligible),
             (f"sampled across {self.users_sampled} users", self.sampled),
         ]
@@ -141,10 +189,12 @@ def _scale_jump(before: Brew, after: Brew) -> bool:
 
 def build_pairs(
     brews: list[Brew],
-    include_leaky: bool = False,
+    leak_mode: str = REDACT,
 ) -> tuple[list[HoldoutPair], PairStats]:
     """Apply the filter chain and return the eligible pairs plus the funnel."""
-    stats = PairStats(total_brews=len(brews))
+    if leak_mode not in LEAK_MODES:
+        raise ValueError(f"leak_mode must be one of {LEAK_MODES}, got {leak_mode!r}")
+    stats = PairStats(total_brews=len(brews), leak_mode=leak_mode)
 
     usable = [b for b in brews if b.created_by and b.coffee_id]
     usable.sort(key=lambda b: (b.brew_timestamp, b.id))
@@ -188,18 +238,31 @@ def build_pairs(
     pairs = []
     for before, after in candidates:
         match = LEAK_PATTERN.search(before.notes)
-        pair = HoldoutPair(
-            before=before,
-            after=after,
-            leaky=match is not None,
-            leak_phrase=match.group(0) if match else None,
+        if leak_mode == RAW:
+            complaint, removed = before.notes, []
+        else:
+            complaint, removed = redact_leaks(before.notes)
+        pairs.append(
+            HoldoutPair(
+                before=before,
+                after=after,
+                leaky=match is not None,
+                leak_phrase=match.group(0) if match else None,
+                complaint=complaint,
+                redacted=removed,
+            )
         )
-        pairs.append(pair)
 
-    leaky_count = sum(1 for p in pairs if p.leaky)
-    if not include_leaky:
+    stats.leaky_detected = sum(1 for p in pairs if p.leaky)
+    if leak_mode == EXCLUDE:
         pairs = [p for p in pairs if not p.leaky]
-        stats.leaky_excluded = leaky_count
+        stats.leaky_excluded = stats.leaky_detected
+    elif leak_mode == REDACT:
+        # A note that was nothing but a stated adjustment leaves no complaint to
+        # diagnose. Dropped, and counted rather than vanishing.
+        kept = [p for p in pairs if p.has_complaint]
+        stats.redacted_to_nothing = len(pairs) - len(kept)
+        pairs = kept
     stats.eligible = len(pairs)
 
     return pairs, stats

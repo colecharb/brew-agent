@@ -260,14 +260,19 @@ class Recommendation:
 class HoldoutPair:
     """An earlier brew and the brew the same user actually made next.
 
-    `before.notes` is the complaint handed to the agent; `after` is the ground
-    truth held out from it.
+    `after` is the ground truth, held out. The input handed to every arm is
+    `complaint` — **not** `before.notes` — because a note that states the
+    adjustment has that span removed first. Reading the raw notes anywhere would
+    quietly reintroduce the leak for that arm only, so nothing does; a test
+    enforces it.
     """
 
     before: Brew
     after: Brew
     leaky: bool = False
     leak_phrase: str | None = None
+    complaint: str = ""
+    redacted: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
 
     @property
@@ -278,6 +283,11 @@ class HoldoutPair:
     def user_id(self) -> str:
         # Filtered to non-null in pairs.build_pairs.
         return str(self.before.created_by)
+
+    @property
+    def has_complaint(self) -> bool:
+        """Whether anything survived redaction to diagnose."""
+        return bool(self.complaint.strip())
 
     @property
     def rating_improved(self) -> bool | None:

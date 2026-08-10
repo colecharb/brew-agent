@@ -8,8 +8,12 @@ a different population.
 import pytest
 
 from brew_agent.eval.pairs import (
+    EXCLUDE,
     LEAK_PATTERN,
+    RAW,
+    REDACT,
     build_pairs,
+    redact_leaks,
     stratified_sample,
 )
 
@@ -19,7 +23,7 @@ def test_seed_loads(seed_brews):
 
 
 def test_funnel_counts(seed_brews):
-    pairs, stats = build_pairs(seed_brews, include_leaky=True)
+    pairs, stats = build_pairs(seed_brews, leak_mode=RAW)
 
     assert stats.consecutive == 592
     assert stats.with_notes == 497
@@ -34,18 +38,50 @@ def test_funnel_counts(seed_brews):
     assert len(pairs) == 372
 
 
-def test_leakage_is_excluded_by_default(seed_brews):
-    with_leaky, leaky_stats = build_pairs(seed_brews, include_leaky=True)
-    without, stats = build_pairs(seed_brews)
+def test_the_three_leak_modes(seed_brews):
+    redacted, r_stats = build_pairs(seed_brews, leak_mode=REDACT)
+    excluded, e_stats = build_pairs(seed_brews, leak_mode=EXCLUDE)
+    raw, raw_stats = build_pairs(seed_brews, leak_mode=RAW)
 
-    leaky = [p for p in with_leaky if p.leaky]
-    assert len(leaky) == stats.leaky_excluded == 105
-    assert len(without) == len(with_leaky) - len(leaky) == 267
-    # Better than a quarter of otherwise-usable pairs state the answer in the
-    # input, counting both the plan form and the verdict form.
-    assert 0.20 < len(leaky) / len(with_leaky) < 0.35
-    assert all(not p.leaky for p in without)
-    assert leaky_stats.leaky_excluded == 0
+    # All three see the same leaks; they differ only in what they do about them.
+    assert r_stats.leaky_detected == e_stats.leaky_detected == raw_stats.leaky_detected
+    assert raw_stats.leaky_detected == 105
+
+    # Better than a quarter of otherwise-usable pairs state the answer.
+    assert 0.20 < 105 / raw_stats.eligible < 0.35
+
+    # Redaction is the point: it keeps the pairs exclusion throws away. Only the
+    # handful that were nothing but a stated adjustment are lost.
+    assert raw_stats.eligible == 372
+    assert r_stats.eligible == 367
+    assert e_stats.eligible == 267
+    assert r_stats.redacted_to_nothing == 5
+    assert len(redacted) - len(excluded) == 100
+
+    assert all(not p.leaky for p in excluded)
+    assert all(p.has_complaint for p in redacted)
+
+
+def test_redaction_removes_the_answer_and_keeps_the_evidence(seed_brews):
+    """No pair may reach an arm still carrying a stated adjustment."""
+    redacted, _ = build_pairs(seed_brews, leak_mode=REDACT)
+    for pair in redacted:
+        assert not LEAK_PATTERN.search(pair.complaint), (
+            f"{pair.id} still leaks: {pair.complaint!r}"
+        )
+
+
+def test_raw_mode_deliberately_leaves_the_answer_in(seed_brews):
+    """The self-test mode has to actually contain the contamination."""
+    raw, _ = build_pairs(seed_brews, leak_mode=RAW)
+    leaky = [p for p in raw if p.leaky]
+    assert leaky and all(LEAK_PATTERN.search(p.complaint) for p in leaky)
+    assert all(p.complaint == p.before.notes for p in raw)
+
+
+def test_unknown_leak_mode_is_rejected(seed_brews):
+    with pytest.raises(ValueError, match="leak_mode"):
+        build_pairs(seed_brews, leak_mode="ignore-it-please")
 
 
 STATED_PLANS = [
@@ -107,6 +143,46 @@ def test_leak_pattern_catches_real_examples(notes):
 def test_leak_pattern_leaves_tasting_notes_alone(notes):
     match = LEAK_PATTERN.search(notes)
     assert not match, f"{notes!r} matched on {match.group(0)!r}"
+
+
+class TestRedaction:
+    def test_cuts_the_plan_and_keeps_the_taste(self):
+        kept, removed = redact_leaks(
+            "Body and zing both! Really close to the subtext cafe brews. "
+            "My guess is that maybe 5-10 um coarser could open this brew up"
+        )
+        assert kept == "Body and zing both! Really close to the subtext cafe brews."
+        assert removed == [
+            "My guess is that maybe 5-10 um coarser could open this brew up"
+        ]
+
+    def test_cuts_the_verdict_form_too(self):
+        kept, removed = redact_leaks("Sour, drying. Too coarse")
+        assert kept == "Sour, drying."
+        assert removed == ["Too coarse"]
+
+    def test_leaves_a_clean_note_untouched(self):
+        note = "Sour and thin, watery body."
+        assert redact_leaks(note) == (note, [])
+
+    def test_a_note_that_is_only_an_adjustment_empties(self):
+        assert redact_leaks("Too coarse")[0] == ""
+
+    def test_splits_on_newlines_as_well_as_punctuation(self):
+        """Plenty of notes are line-separated fragments with no full stops."""
+        kept, removed = redact_leaks("Juicy, sweet\nmight push finer\ngood body")
+        assert kept == "Juicy, sweet good body"
+        assert removed == ["might push finer"]
+
+    @pytest.mark.parametrize("notes", STATED_PLANS + STATED_VERDICTS)
+    def test_no_stated_adjustment_survives(self, notes):
+        kept, removed = redact_leaks(notes)
+        assert removed
+        assert not LEAK_PATTERN.search(kept)
+
+    @pytest.mark.parametrize("notes", TASTE_ONLY)
+    def test_taste_notes_survive_intact(self, notes):
+        assert redact_leaks(notes) == (" ".join(notes.split("\n")).strip(), [])
 
 
 def test_pairs_are_same_user_coffee_and_setup(seed_brews):

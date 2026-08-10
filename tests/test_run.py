@@ -54,15 +54,16 @@ def test_results_file_is_written_and_parses(result):
     payload = json.loads(result["output_path"].read_text())
     assert payload["run_id"] == result["run_id"]
     assert payload["sampled"] == 12
-    assert payload["include_leaky"] is False
+    assert payload["leak_mode"] == "redact"
     assert set(payload["arms"]) == {"rules"}
-    # 372 pairs survive the filter chain; 105 of them (28%) state the next
-    # adjustment in the notes and are excluded by default.
+    # 372 pairs survive the filter chain; 105 state an adjustment, and
+    # redacting rather than excluding keeps all but the 5 that were nothing
+    # else.
     assert payload["funnel"]["something_changed"] == 372
-    assert payload["funnel"]["leaky_excluded"] == 105
-    assert payload["funnel"]["eligible"] == 267
+    assert payload["funnel"]["leaky_detected"] == 105
+    assert payload["funnel"]["redacted_to_nothing"] == 5
+    assert payload["funnel"]["eligible"] == 367
     assert len(payload["pairs"]) == 12
-    assert all(p["leaky"] is False for p in payload["pairs"])
 
 
 def test_every_trace_is_inspectable(result):
@@ -104,17 +105,29 @@ def test_report_prints_without_blowing_up(result, capsys):
         assert column in out
 
 
-def test_leaky_pairs_are_opt_in(tmp_path, seed_brews):
-    strict = run_eval(
-        SeedDatabase(seed_brews), ["rules"], n=400,
-        trace_root=tmp_path / "a", output_root=tmp_path / "a",
-    )
-    loose = run_eval(
-        SeedDatabase(seed_brews), ["rules"], n=400, include_leaky=True,
-        trace_root=tmp_path / "b", output_root=tmp_path / "b",
-    )
-    assert loose["stats"].eligible > strict["stats"].eligible
-    assert strict["stats"].leaky_excluded > 0
+def test_the_three_leak_modes_are_all_runnable(tmp_path, seed_brews):
+    def run(mode, tag):
+        return run_eval(
+            SeedDatabase(seed_brews), ["rules"], n=400, leak_mode=mode,
+            trace_root=tmp_path / tag, output_root=tmp_path / tag,
+        )
+
+    redacted, excluded, raw = run("redact", "a"), run("exclude", "b"), run("raw", "c")
+
+    # Redaction keeps nearly everything; exclusion pays 100 pairs for the same
+    # protection; raw keeps the contamination on purpose.
+    assert raw["stats"].eligible == 372
+    assert redacted["stats"].eligible == 367
+    assert excluded["stats"].eligible == 267
+
+
+def test_traces_show_what_was_redacted(result):
+    """A redaction has to be auditable, not taken on trust."""
+    payloads = [json.loads(p.read_text()) for p in result["trace_dir"].glob("*.json")]
+    assert all("redacted_out" in p["input"] for p in payloads)
+    # complaint + redacted_out reconstructs the note, so the raw text is not
+    # duplicated into the trace.
+    assert all("raw_notes" not in p["input"] for p in payloads)
 
 
 def test_unknown_arm_is_rejected_before_connecting():

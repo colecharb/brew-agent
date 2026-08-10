@@ -20,7 +20,7 @@ from ..baselines import ArmResult, NoToolsBaseline, run_rules
 from ..config import OUTPUT_DIR, TRACE_DIR, ConfigError, ModelConfig
 from ..models import HoldoutPair
 from ..tools import Toolbox
-from .pairs import PairStats, build_pairs, stratified_sample
+from .pairs import EXCLUDE, RAW, REDACT, PairStats, build_pairs, stratified_sample
 from .scoring import ArmScore, PairScore, aggregate, score_pair
 
 ARMS = ("rules", "no_tools", "agent")
@@ -45,7 +45,7 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
     """Wire up the requested arms, constructing an API client only if needed."""
     runners: list[Runner] = []
     if "rules" in names:
-        runners.append(Runner("rules", lambda p: run_rules(p.before, p.before.notes)))
+        runners.append(Runner("rules", lambda p: run_rules(p.before, p.complaint)))
 
     if not any(name in NEEDS_API_KEY for name in names):
         return runners
@@ -59,13 +59,13 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
     if "no_tools" in names:
         baseline = NoToolsBaseline(client, config)
         runners.append(
-            Runner("no_tools", lambda p: baseline.run(p.before, p.before.notes))
+            Runner("no_tools", lambda p: baseline.run(p.before, p.complaint))
         )
     if "agent" in names:
         from ..agent import BrewAgent
 
         agent = BrewAgent(client, config, Toolbox(db))
-        runners.append(Runner("agent", lambda p: agent.run(p.before, p.before.notes)))
+        runners.append(Runner("agent", lambda p: agent.run(p.before, p.complaint)))
 
     # Preserve the order the caller asked for.
     return sorted(runners, key=lambda r: names.index(r.name))
@@ -75,14 +75,14 @@ def run_eval(
     db: SupportsBrewReads,
     names: list[str],
     n: int,
-    include_leaky: bool = False,
+    leak_mode: str = REDACT,
     trace_root: Path | None = None,
     output_root: Path | None = None,
 ) -> dict:
     """Fetch, pair, sample, run every arm, score, and write the artefacts."""
     runners = build_runners(names, db)
     brews = db.fetch_all_brews()
-    pairs, stats = build_pairs(brews, include_leaky=include_leaky)
+    pairs, stats = build_pairs(brews, leak_mode=leak_mode)
     sample = stratified_sample(pairs, n, stats)
     if not sample:
         raise RuntimeError("no eligible holdout pairs found")
@@ -111,7 +111,7 @@ def run_eval(
             {
                 "run_id": run_id,
                 "sampled": len(sample),
-                "include_leaky": include_leaky,
+                "leak_mode": leak_mode,
                 "funnel": dict(stats.__dict__),
                 "arms": {name: arm.to_dict() for name, arm in scores.items()},
                 "pairs": [
@@ -210,7 +210,14 @@ def _write_trace(
         "leak_phrase": pair.leak_phrase,
         "input": {
             "brew_id": pair.before.id,
-            "complaint": pair.before.notes,
+            # What the arm actually read, plus what was withheld, so a redaction
+            # can be judged by eye rather than taken on trust. The two together
+            # reconstruct the original note, so it is not repeated here — and
+            # not repeating it keeps `pair.before.notes` unreachable outside
+            # pairs.py, which is what the bypass guard enforces.
+            "complaint": pair.complaint,
+            "redacted_out": pair.redacted,
+            "leak_phrase": pair.leak_phrase,
             "brew": pair.before.to_tool_result(),
         },
         "held_out_next_brew": pair.after.to_tool_result(),
@@ -231,15 +238,31 @@ def main(argv: list[str] | None = None) -> int:
         default=",".join(ARMS),
         help=f"comma-separated subset of {','.join(ARMS)}",
     )
-    parser.add_argument(
-        "--include-leaky",
-        action="store_true",
+    leak = parser.add_mutually_exclusive_group()
+    leak.add_argument(
+        "--exclude-leaky",
+        dest="leak_mode",
+        action="store_const",
+        const=EXCLUDE,
         help=(
-            "keep pairs whose notes already state the next adjustment. Any arm "
-            "that reads the notes should approach 100%% on these, which makes "
-            "them a harness self-test and not a measurement."
+            "drop pairs whose notes state an adjustment instead of redacting "
+            "the sentence. Conservative cross-check: if the headline moves much "
+            "against the default, redaction is leaving hints."
         ),
     )
+    leak.add_argument(
+        "--include-leaky",
+        dest="leak_mode",
+        action="store_const",
+        const=RAW,
+        help=(
+            "leave stated adjustments in. Not a measurement — a harness "
+            "self-test. Any arm that reads the notes should approach 100%% "
+            "here, and one that doesn't has a bug. The gap against the default "
+            "run is the contamination redaction removes."
+        ),
+    )
+    parser.set_defaults(leak_mode=REDACT)
     args = parser.parse_args(argv)
 
     seen: list[str] = []
@@ -255,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         db = BrewDatabase.connect()
         print(f"signed in as {db.user_id}")
-        result = run_eval(db, seen, args.n, include_leaky=args.include_leaky)
+        result = run_eval(db, seen, args.n, leak_mode=args.leak_mode)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
