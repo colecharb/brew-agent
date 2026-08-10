@@ -27,6 +27,9 @@ identically.
 from __future__ import annotations
 
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -36,6 +39,12 @@ from ..config import ModelConfig
 from ..models import Brew
 
 LABEL_TOOL = "label_note"
+
+# Notes are independent, so labelling is embarrassingly parallel. Eight in
+# flight turns ~30 minutes of sequential calls into a few minutes. Lower it with
+# BREW_AGENT_LABEL_CONCURRENCY if your account's rate limits complain — the SDK
+# retries 429s on its own, but there is no point provoking them.
+DEFAULT_CONCURRENCY = int(os.environ.get("BREW_AGENT_LABEL_CONCURRENCY", "8"))
 
 LABEL_SCHEMA: dict[str, Any] = {
     "name": LABEL_TOOL,
@@ -128,22 +137,52 @@ def label_brews(
     brews: Iterable[Brew],
     cache_path: Path,
     progress: bool = True,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> dict[str, NoteLabel]:
-    """Label every note not already in the cache, then persist and return all."""
+    """Label every note not already in the cache, then persist and return all.
+
+    Notes are independent, so they go out concurrently — sequentially this is
+    around half an hour for a corpus this size, and a few minutes in parallel.
+
+    Concurrency rather than a cheaper or shallower call is the deliberate
+    choice. Effort stays where the other components have it: this is the one
+    piece whose mistakes are *not* symmetric across arms, since a leak the
+    labeller misses only helps the arms that can read prose. Parallelism costs
+    nothing in quality; trimming the thinking might.
+    """
     labels = load_cache(cache_path)
     pending = [b for b in brews if b.notes.strip() and b.id not in labels]
+    if not pending:
+        return labels
 
-    for index, brew in enumerate(pending, start=1):
-        if progress:
-            print(f"  labelling {index}/{len(pending)}", end="\r", flush=True)
-        labels[brew.id] = _label_one(client, config, brew.notes)
-        # Persist as we go: a labelling run interrupted at note 300 should not
-        # throw away 299 answers.
-        if index % 25 == 0:
-            save_cache(cache_path, labels)
+    lock = threading.Lock()
+    completed = 0
+
+    def label_one(brew: Brew) -> tuple[str, NoteLabel]:
+        # `_label_one` already fails closed; this is the backstop that keeps a
+        # single unexpected error from aborting a 700-note run.
+        try:
+            return brew.id, _label_one(client, config, brew.notes)
+        except Exception:
+            return brew.id, NoteLabel(states_adjustment=True, has_complaint=True)
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        for future in as_completed(pool.submit(label_one, b) for b in pending):
+            brew_id, label = future.result()
+            with lock:
+                labels[brew_id] = label
+                completed += 1
+                # Persist as we go: an interrupted run should not throw away
+                # the answers it already paid for.
+                if completed % 25 == 0:
+                    save_cache(cache_path, labels)
+                if progress:
+                    print(
+                        f"  labelling {completed}/{len(pending)}", end="\r", flush=True
+                    )
 
     save_cache(cache_path, labels)
-    if progress and pending:
+    if progress:
         print(f"  labelled {len(pending)} new note(s); {len(labels)} cached")
     return labels
 

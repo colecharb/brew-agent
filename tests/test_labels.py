@@ -1,6 +1,7 @@
 """The cached note labeller, driven by a scripted client. No network."""
 
 import json
+import threading
 from dataclasses import dataclass, field
 
 import pytest
@@ -151,6 +152,105 @@ class TestLabelBrews:
             client, CONFIG, [note_brew("a", "Sour")], tmp_path / "n.json", progress=False
         )
         assert labels["a"].states_adjustment is True
+
+
+class PerNoteClient:
+    """Answers per note, and can be told to fail on one of them."""
+
+    class Messages:
+        def __init__(self, outer):
+            self._outer = outer
+            self.calls: list[dict] = []
+            self._lock = threading.Lock()
+
+        def create(self, **kwargs):
+            note = kwargs["messages"][0]["content"]
+            with self._lock:
+                self.calls.append(kwargs)
+            if note == self._outer.fails_on:
+                raise RuntimeError("503 overloaded")
+            return FakeResponse(
+                [
+                    ToolUseBlock(
+                        LABEL_TOOL,
+                        {
+                            "states_adjustment": note.startswith("leak"),
+                            "adjustment_quotes": [],
+                            "has_complaint": True,
+                        },
+                    )
+                ]
+            )
+
+    def __init__(self, fails_on: str | None = None):
+        self.fails_on = fails_on
+        self.messages = self.Messages(self)
+
+
+class TestConcurrency:
+    """Labelling runs in parallel; correctness must not depend on that."""
+
+    @staticmethod
+    def _corpus(n=40):
+        return [
+            note_brew(f"b{i}", ("leak note " if i % 3 == 0 else "taste note ") + str(i))
+            for i in range(n)
+        ]
+
+    def test_every_note_is_labelled_exactly_once(self, tmp_path):
+        brews = self._corpus()
+        client = PerNoteClient()
+        labels = label_brews(
+            client, CONFIG, brews, tmp_path / "n.json", progress=False, concurrency=8
+        )
+        assert len(labels) == len(brews)
+        assert len(client.messages.calls) == len(brews)
+
+    def test_each_label_lands_against_its_own_note(self, tmp_path):
+        """The real risk of parallelism: answers attached to the wrong brew."""
+        brews = self._corpus()
+        labels = label_brews(
+            PerNoteClient(), CONFIG, brews, tmp_path / "n.json",
+            progress=False, concurrency=8,
+        )
+        for brew in brews:
+            expected = brew.notes.startswith("leak")
+            assert labels[brew.id].states_adjustment is expected, brew.id
+
+    def test_one_failure_does_not_lose_the_rest(self, tmp_path):
+        brews = self._corpus()
+        doomed = brews[7]
+        labels = label_brews(
+            PerNoteClient(fails_on=doomed.notes), CONFIG, brews,
+            tmp_path / "n.json", progress=False, concurrency=8,
+        )
+        assert len(labels) == len(brews)
+        # Fails closed, and the other 39 are unaffected.
+        assert labels[doomed.id].states_adjustment is True
+        assert labels[brews[8].id].states_adjustment is brews[8].notes.startswith("leak")
+
+    def test_the_cache_survives_the_parallel_run(self, tmp_path):
+        path = tmp_path / "n.json"
+        brews = self._corpus()
+        label_brews(PerNoteClient(), CONFIG, brews, path, progress=False, concurrency=8)
+
+        # A second pass makes no calls at all.
+        client = PerNoteClient()
+        again = label_brews(client, CONFIG, brews, path, progress=False, concurrency=8)
+        assert client.messages.calls == []
+        assert len(again) == len(brews)
+
+    def test_serial_and_parallel_agree(self, tmp_path):
+        brews = self._corpus(12)
+        serial = label_brews(
+            PerNoteClient(), CONFIG, brews, tmp_path / "s.json",
+            progress=False, concurrency=1,
+        )
+        parallel = label_brews(
+            PerNoteClient(), CONFIG, brews, tmp_path / "p.json",
+            progress=False, concurrency=8,
+        )
+        assert serial == parallel
 
 
 class TestIntegrationWithPairs:

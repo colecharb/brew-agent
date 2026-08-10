@@ -134,6 +134,13 @@ label calling a note clean never un-redacts a regex match. A failed labelling
 call fails closed. The funnel prints how many leaks only the labeller found — near
 zero means the regex is doing the job.
 
+The labelling pass is one call per note, run 8 at a time
+(`BREW_AGENT_LABEL_CONCURRENCY`; lower it if your rate limits complain). A
+first pass over ~700 notes takes a few minutes; after that it is cached by brew
+id, so later runs only pay for notes you have added since. Progress is written
+every 25 notes, so interrupting it loses at most 25 and resumes where it left
+off.
+
 ## The arms — a ladder, one rung at a time
 
 Each arm adds exactly one capability to the one below it, so the gap between any
