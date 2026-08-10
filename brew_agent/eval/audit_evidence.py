@@ -88,16 +88,27 @@ def read_traces(trace_dir: Path, arm: str) -> Iterator[dict]:
         yield json.loads(path.read_text())
 
 
-def audit(trace_dir: Path, arm: str) -> tuple[Counter, dict[str, list[tuple[str, str]]]]:
+def audit(
+    trace_dir: Path, arm: str
+) -> tuple[Counter, dict[str, list[tuple[str, str]]], Counter]:
+    """Bucket every quote, and cross-tabulate the buckets against the verdict.
+
+    The cross-tab is what separates "the model invents quotes" from "the schema
+    asked for something it cannot express". A field documented as empty for one
+    verdict, that is never actually empty for it, is a schema problem.
+    """
     counts: Counter = Counter()
     examples: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    by_verdict: Counter = Counter()
     for payload in read_traces(trace_dir, arm):
-        evidence = payload.get("trace", {}).get("evidence") or ""
+        trace = payload.get("trace") or {}
+        evidence = trace.get("evidence") or ""
         note = payload.get("input", {}).get("complaint") or ""
         name = bucket(evidence, note)
         counts[name] += 1
         examples[name].append((evidence, note))
-    return counts, examples
+        by_verdict[(trace.get("verdict") or "no verdict", name)] += 1
+    return counts, examples, by_verdict
 
 
 def _bar(count: int, total: int, width: int = 24) -> str:
@@ -130,6 +141,25 @@ def report(runs: list[tuple[str, Counter]], width: int = 12) -> None:
         print(f"  {name:<13} {WHAT_IT_MEANS[name]}")
 
 
+def report_by_verdict(run_id: str, by_verdict: Counter) -> None:
+    """Which verdicts produce which kind of quote.
+
+    `neither` and `both` are the verdicts the schema documents as having no
+    evidence to give. If their row is anything other than `empty`, the field is
+    being filled with something because it cannot be left unfilled.
+    """
+    verdicts = sorted({verdict for verdict, _ in by_verdict})
+    if not verdicts:
+        return
+    header = f"{'verdict':<18}" + "".join(f"{name:>13}" for name in BUCKETS)
+    print(f"\n{run_id} — bucket by verdict")
+    print(header)
+    print("-" * len(header))
+    for verdict in verdicts:
+        row = "".join(f"{by_verdict[(verdict, name)]:>13}" for name in BUCKETS)
+        print(f"{verdict:<18}{row}")
+
+
 def show_examples(examples: dict, per_bucket: int) -> None:
     for name in BUCKETS:
         rows = examples.get(name) or []
@@ -151,21 +181,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     runs = []
+    crosstabs: list[tuple[str, Counter]] = []
     last_examples: dict = {}
     for trace_dir in args.trace_dirs:
         if not trace_dir.is_dir():
             print(f"error: {trace_dir} is not a directory", file=sys.stderr)
             return 2
-        counts, examples = audit(trace_dir, args.arm)
+        counts, examples, by_verdict = audit(trace_dir, args.arm)
         if not sum(counts.values()):
             print(
                 f"error: no {args.arm}-*.json traces in {trace_dir}", file=sys.stderr
             )
             return 1
         runs.append((trace_dir.name, counts))
+        crosstabs.append((trace_dir.name, by_verdict))
         last_examples = examples
 
     report(runs)
+    for run_id, by_verdict in crosstabs:
+        report_by_verdict(run_id, by_verdict)
     if args.examples:
         print(f"\nExamples from {runs[-1][0]}:")
         show_examples(last_examples, args.examples)

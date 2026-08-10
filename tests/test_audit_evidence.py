@@ -53,7 +53,7 @@ class TestBucket:
         assert bucket("SOUR, DRYING", self.NOTE) == "verbatim"
 
 
-def write_trace(directory, pair_id, evidence, complaint, arm="classify"):
+def write_trace(directory, pair_id, evidence, complaint, arm="classify", verdict=None):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{arm}-{pair_id}.json").write_text(
         json.dumps(
@@ -61,7 +61,7 @@ def write_trace(directory, pair_id, evidence, complaint, arm="classify"):
                 "arm": arm,
                 "pair_id": pair_id,
                 "input": {"complaint": complaint},
-                "trace": {"arm": arm, "evidence": evidence},
+                "trace": {"arm": arm, "evidence": evidence, "verdict": verdict},
             }
         )
     )
@@ -73,7 +73,7 @@ class TestAudit:
         write_trace(run, "a", "Sour, thin", "Sour, thin body.")
         write_trace(run, "b", "sour thin", "Sour, thin body.")
         write_trace(run, "c", "", "Yes.")
-        counts, _ = audit(run, "classify")
+        counts, _, _ = audit(run, "classify")
         assert counts["verbatim"] == 1
         assert counts["punctuation"] == 1
         assert counts["empty"] == 1
@@ -83,7 +83,7 @@ class TestAudit:
         run = tmp_path / "run"
         write_trace(run, "a", "Sour", "Sour and thin.")
         write_trace(run, "b", "Sour", "Sour and thin.", arm="agent")
-        counts, _ = audit(run, "classify")
+        counts, _, _ = audit(run, "classify")
         assert sum(counts.values()) == 1
 
     def test_a_trace_with_no_evidence_field_is_empty_not_a_crash(self, tmp_path):
@@ -93,14 +93,46 @@ class TestAudit:
         (run / "classify-x.json").write_text(
             json.dumps({"pair_id": "x", "input": {}, "trace": {}})
         )
-        counts, _ = audit(run, "classify")
+        counts, _, _ = audit(run, "classify")
         assert counts["empty"] == 1
 
     def test_examples_are_collected_for_inspection(self, tmp_path):
         run = tmp_path / "run"
         write_trace(run, "a", "bitter ashy", "Sour and thin.")
-        _, examples = audit(run, "classify")
+        _, examples, _ = audit(run, "classify")
         assert examples["unrelated"] == [("bitter ashy", "Sour and thin.")]
+
+
+class TestCrossTabAgainstVerdict:
+    """The cross-tab is what tells a bad model from a bad schema.
+
+    A field the schema documents as empty for one verdict, that is never empty
+    for it, is being filled because it cannot be left unfilled.
+    """
+
+    def test_buckets_are_split_by_verdict(self, tmp_path):
+        run = tmp_path / "run"
+        write_trace(run, "a", "Sour", "Sour and thin.", verdict="under_extracted")
+        write_trace(run, "b", "</antml parameter>", "Yes.", verdict="neither")
+        write_trace(run, "c", "</antml parameter>", "Lovely.", verdict="neither")
+        _, _, by_verdict = audit(run, "classify")
+        assert by_verdict[("under_extracted", "verbatim")] == 1
+        assert by_verdict[("neither", "unrelated")] == 2
+        assert by_verdict[("neither", "empty")] == 0
+
+    def test_a_missing_verdict_is_labelled_not_dropped(self, tmp_path):
+        run = tmp_path / "run"
+        write_trace(run, "a", "Sour", "Sour and thin.")
+        _, _, by_verdict = audit(run, "classify")
+        assert by_verdict[("no verdict", "verbatim")] == 1
+
+    def test_the_cross_tab_is_printed_per_run(self, tmp_path, capsys):
+        run = tmp_path / "run"
+        write_trace(run, "a", "</antml parameter>", "Yes.", verdict="neither")
+        main([str(run)])
+        out = capsys.readouterr().out
+        assert "bucket by verdict" in out
+        assert "neither" in out
 
 
 class TestCommand:
