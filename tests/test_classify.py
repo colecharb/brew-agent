@@ -302,6 +302,42 @@ class TestEvidenceIsCheckedAgainstTheNote:
         _, result = classify(NEITHER, note="Yes.", evidence="")
         assert result.trace["evidence_verbatim"] is True
 
+    def test_null_evidence_is_accepted(self):
+        """The schema's way of saying "nothing to quote" — must not crash."""
+        _, result = classify(NEITHER, note="Yes.", evidence=None)
+        assert result.trace["evidence"] == ""
+        assert result.trace["evidence_verbatim"] is True
+        assert result.recommendation.error is None
+
+
+class TestEvidenceMayBeNull:
+    """Under `strict` every property is required, so "nothing to say" needs a
+    value that means it.
+
+    Documented as a plain required string that should be "empty for neither",
+    the field came back holding a fragment of the tool-call markup on about
+    half of all calls across two different models — and never once actually
+    empty. Asked for a string it has no content for, the model emits something.
+    """
+
+    @staticmethod
+    def _field(name: str) -> dict:
+        return CLASSIFY_TASTE["input_schema"]["properties"][name]
+
+    def test_evidence_accepts_null(self):
+        assert {"type": "null"} in self._field("evidence")["anyOf"]
+
+    def test_evidence_still_accepts_a_string(self):
+        assert {"type": "string"} in self._field("evidence")["anyOf"]
+
+    def test_the_verdict_itself_is_never_nullable(self):
+        """It is the one field that always has an answer, and it drives scoring."""
+        assert "anyOf" not in self._field("verdict")
+        assert self._field("verdict")["type"] == "string"
+
+    def test_the_description_no_longer_asks_for_an_empty_string(self):
+        assert "empty for neither" not in self._field("evidence")["description"].lower()
+
     def test_junk_evidence_still_scores_off_the_verdict(self):
         """The check observes; it must not become a second gate on the answer.
 

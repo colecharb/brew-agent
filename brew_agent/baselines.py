@@ -33,7 +33,7 @@ import anthropic
 
 from .config import MAX_TOKENS, ModelConfig
 from .models import Brew, Recommendation
-from .tools import SUBMIT_RECOMMENDATION, SUBMIT_TOOL, SYSTEM_PROMPT
+from .tools import SUBMIT_RECOMMENDATION, SUBMIT_TOOL, SYSTEM_PROMPT, nullable
 
 _warned: set[str] = set()
 _warn_lock = threading.Lock()
@@ -235,13 +235,12 @@ CLASSIFY_TASTE: dict[str, Any] = {
                     "note gives no evidence either way."
                 ),
             },
-            "evidence": {
-                "type": "string",
-                "description": (
-                    "The words from the note that decided it, copied verbatim "
-                    "rather than paraphrased. Empty for neither."
-                ),
-            },
+            "evidence": nullable(
+                "string",
+                "The words from the note that decided it, copied verbatim "
+                "rather than paraphrased. Null when the verdict is neither or "
+                "both and there is nothing in the note to quote.",
+            ),
         },
         "required": ["verdict", "evidence"],
         "additionalProperties": False,

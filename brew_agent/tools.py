@@ -17,8 +17,15 @@ from .models import LEVERS
 SUBMIT_TOOL = "submit_recommendation"
 
 
-def _nullable(json_type: str, description: str) -> dict[str, Any]:
-    """A field the model may leave unset, meaning "don't change this"."""
+def nullable(json_type: str, description: str) -> dict[str, Any]:
+    """A field the model may leave unset.
+
+    Under `strict`, every property is required, so "leave this out" has to be
+    expressible as a value. Documenting a plain string field as "empty when
+    there is nothing to say" does not work: asked for a required string it has
+    no content for, the model emits *something*, and what came back in practice
+    was a fragment of the tool-call markup rather than "". Give it null instead.
+    """
     return {
         "anyOf": [{"type": json_type}, {"type": "null"}],
         "description": description,
@@ -125,21 +132,21 @@ SUBMIT_RECOMMENDATION: dict[str, Any] = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "grind_setting": _nullable(
+            "grind_setting": nullable(
                 "string",
                 "The grind setting to use next, as a number on this grinder's "
                 "own dial — the same scale as the brew you are diagnosing. If "
                 "that brew was ground at 500, answer with something like '485', "
                 "not 'finer'. Null to leave the grind alone.",
             ),
-            "coffee_weight": _nullable("number", "Dose in grams, or null."),
-            "target_weight": _nullable(
+            "coffee_weight": nullable("number", "Dose in grams, or null."),
+            "target_weight": nullable(
                 "number", "Target yield in grams, or null."
             ),
-            "water_temp": _nullable(
+            "water_temp": nullable(
                 "number", "Water temperature in Celsius, or null."
             ),
-            "time": _nullable("integer", "Total brew time in seconds, or null."),
+            "time": nullable("integer", "Total brew time in seconds, or null."),
             "primary_lever": {
                 "type": "string",
                 "enum": [*LEVERS, "none"],
