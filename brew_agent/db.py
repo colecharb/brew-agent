@@ -82,6 +82,16 @@ SELECT = """
 PAGE_SIZE = 500
 DEFAULT_LIMIT = 20
 
+# How another person's brew relates to the one being diagnosed. Ordered tightest
+# first; each later tier is a superset of the one before it, so rows are
+# deduplicated in this order. What transfers differs by tier, which is why the
+# label travels with the rows rather than being inferred from them.
+COMMUNITY_TIERS = (
+    "same_coffee_same_setup",
+    "same_setup_other_coffee",
+    "same_coffee_other_setup",
+)
+
 
 class BrewDatabase:
     """Authenticated read-only access to brews, beans, and gear."""
@@ -182,6 +192,81 @@ class BrewDatabase:
         if user_id:
             query = query.eq("created_by", user_id)
         return self._ordered(query, limit, as_of)
+
+    def get_community_brews(
+        self,
+        coffee_id: str,
+        grinder_id: str,
+        brewer_id: str,
+        exclude_user: str,
+        min_rating: int = 2,
+        limit: int = DEFAULT_LIMIT,
+        as_of: str | None = None,
+        widen_below: int = 3,
+    ) -> dict[str, list[Brew]]:
+        """Other people's brews, grouped by what they are comparable on.
+
+        The tight query — this coffee, this grinder, this brewer, somebody else
+        — matches 14% of pairs in this corpus, usually with a single row. So
+        widening is the normal path, not the exception, and the tiers are the
+        point: a caller that cannot tell which rows came from which query will
+        read a stranger's grind number off a different grinder.
+
+        Both relaxations are returned rather than one, because they answer
+        different questions. The same setup keeps grind numbers on the same
+        dial while the coffee changes; the same coffee keeps ratio, temperature
+        and days-off-roast meaningful while the dial changes. Which is useful
+        depends on what is being diagnosed, and the caller knows that.
+
+        Rows are deduplicated in tier order, since each relaxation is a superset
+        of the tight query.
+        """
+        bag_ids = self._bag_ids_for_coffee(coffee_id, None)
+        seen: set[str] = set()
+        tiers: dict[str, list[Brew]] = {name: [] for name in COMMUNITY_TIERS}
+
+        def others():
+            return (
+                self._select()
+                .neq("created_by", exclude_user)
+                .gte("rating", min_rating)
+            )
+
+        def take(query, cap: int) -> list[Brew]:
+            rows = [b for b in self._ordered(query, limit, as_of) if b.id not in seen]
+            rows = rows[:cap]
+            # `.add` in a loop rather than `.update()`, because the read-only
+            # guard greps this package for write verbs and cannot tell a set
+            # from a table. Not `|=` either: augmented assignment would rebind
+            # `seen` as a local of this closure rather than mutating the outer
+            # one, which is a silent no-op for dedupe and an UnboundLocalError
+            # for the read.
+            for brew in rows:
+                seen.add(brew.id)
+            return rows
+
+        if bag_ids:
+            tiers["same_coffee_same_setup"] = take(
+                others()
+                .in_("profile_coffee_id", bag_ids)
+                .eq("grinder_id", grinder_id)
+                .eq("brewer_id", brewer_id),
+                limit,
+            )
+
+        exact = len(tiers["same_coffee_same_setup"])
+        if exact >= widen_below:
+            return tiers
+
+        room = max(1, (limit - exact) // 2)
+        tiers["same_setup_other_coffee"] = take(
+            others().eq("grinder_id", grinder_id).eq("brewer_id", brewer_id), room
+        )
+        if bag_ids:
+            tiers["same_coffee_other_setup"] = take(
+                others().in_("profile_coffee_id", bag_ids), room
+            )
+        return tiers
 
     # --- harness-only, never exposed to the model --------------------------
 

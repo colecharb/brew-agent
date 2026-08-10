@@ -26,8 +26,8 @@ from .pairs import EXCLUDE, RAW, REDACT, PairStats, build_pairs, stratified_samp
 from .scoring import ArmScore, PairScore, aggregate, score_pair
 
 # Ordered as a ladder: each rung adds one capability to the one before it.
-ARMS = ("rules", "classify", "no_tools", "agent")
-NEEDS_API_KEY = ("classify", "no_tools", "agent")
+ARMS = ("rules", "classify", "no_tools", "agent", "agent_community")
+NEEDS_API_KEY = ("classify", "no_tools", "agent", "agent_community")
 
 # Pairs in flight. Each one carries a full agent loop, so this is also the
 # number of concurrent readers the database sees. Six turns a four-arm hundred-
@@ -79,6 +79,24 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
 
         agent = BrewAgent(client, config, Toolbox(db))
         runners.append(Runner("agent", lambda p: agent.run(p.before, p.complaint)))
+    if "agent_community" in names:
+        from ..agent import BrewAgent
+        from ..tools import COMMUNITY_SYSTEM_PROMPT, COMMUNITY_TOOLS
+
+        # Same loop, same three tools, one more: everyone else's brews, grouped
+        # by what they are comparable on. The gap against `agent` is what the
+        # community's history is worth.
+        community = BrewAgent(
+            client,
+            config,
+            Toolbox(db),
+            tools=COMMUNITY_TOOLS,
+            system=COMMUNITY_SYSTEM_PROMPT,
+            name="agent_community",
+        )
+        runners.append(
+            Runner("agent_community", lambda p: community.run(p.before, p.complaint))
+        )
 
     # Preserve the order the caller asked for.
     return sorted(runners, key=lambda r: names.index(r.name))

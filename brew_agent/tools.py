@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .db import BrewDatabase
+from .db import COMMUNITY_TIERS, BrewDatabase
 from .models import LEVERS
 
 SUBMIT_TOOL = "submit_recommendation"
@@ -57,10 +57,12 @@ DATA_TOOLS: list[dict[str, Any]] = [
             "up, which ratios scored well, how it changed as it aged. "
             "coffee_id is the catalogue coffee, so this spans every bag of it. "
             "Pass user_id to stay within one person's history; omit it to see "
-            "how everyone brews this coffee, but note that other people's grind "
-            "numbers are on their own grinders and do not transfer. Only brews "
-            "made before the one you are diagnosing are returned, so an empty "
-            "result means this is the first — not that the lookup failed."
+            "how everyone brews this coffee. Another person's grind number is "
+            "comparable when their grinder and brewer match — those set the "
+            "units and the regime — while ratio, water temperature and days "
+            "off roast compare whatever the gear. Only brews made before the "
+            "one you are diagnosing are returned, so an empty result means this "
+            "is the first — not that the lookup failed."
         ),
         "input_schema": {
             "type": "object",
@@ -182,6 +184,70 @@ SUBMIT_RECOMMENDATION: dict[str, Any] = {
 ALL_TOOLS = [*DATA_TOOLS, SUBMIT_RECOMMENDATION]
 
 
+# What each tier of community result is good for. Sent with the rows rather
+# than left to be worked out, because the failure mode is silent: a grind
+# number read off somebody else's grinder looks exactly like a usable one.
+TIER_GUIDANCE = {
+    "same_coffee_same_setup": (
+        "Same coffee, same grinder and brewer. Everything here compares "
+        "directly, grind number included."
+    ),
+    "same_setup_other_coffee": (
+        "Same grinder and brewer, other coffees. Grind numbers are on this "
+        "same dial, so read them as the range this equipment works in — not "
+        "as a target for this particular coffee."
+    ),
+    "same_coffee_other_setup": (
+        "Same coffee, different grinder or brewer. Ratio, water temperature "
+        "and days off roast compare. The grind numbers do NOT — they are on "
+        "another dial and mean nothing here."
+    ),
+}
+
+GET_COMMUNITY_BREWS: dict[str, Any] = {
+    "name": "get_community_brews",
+    "description": (
+        "Other people's well-rated brews of this coffee, on this equipment, or "
+        "both. Use it when this user's own history is thin — a coffee they have "
+        "brewed once, or gear they are new to — and to sanity-check a "
+        "recommendation against how the same coffee behaves for everyone else. "
+        "Results come back in up to three labelled groups, tightest first, "
+        "because what transfers depends on how the brew matches: everything "
+        "compares on the same coffee and setup, only the grind range compares "
+        "on the same setup with a different coffee, and only ratio, "
+        "temperature and days off roast compare on the same coffee with "
+        "different gear. Each group says so, and every row carries its owner "
+        "and gear. The tight group is often empty or a single brew, so the "
+        "looser groups are the normal case rather than a fallback. The user's "
+        "own brews are excluded — the other tools are for those. Only brews "
+        "made before the one you are diagnosing are returned."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "coffee_id": {
+                "type": "string",
+                "description": "Catalogue coffee UUID, from get_brew.",
+            },
+            "grinder_id": {"type": "string", "description": "Grinder UUID."},
+            "brewer_id": {"type": "string", "description": "Brewer UUID."},
+            "min_rating": {
+                "type": "integer",
+                "description": (
+                    "Minimum rating, 0-4. Default 2 (Good). Unrated brews are "
+                    "excluded — a setting nobody scored says nothing about "
+                    "whether it worked."
+                ),
+            },
+            "limit": {"type": "integer", "description": "Max rows, default 20."},
+        },
+        "required": ["coffee_id", "grinder_id", "brewer_id"],
+    },
+}
+
+COMMUNITY_TOOLS = [*DATA_TOOLS, GET_COMMUNITY_BREWS, SUBMIT_RECOMMENDATION]
+
+
 SYSTEM_PROMPT = """You diagnose coffee brews. Given a brew and the drinker's \
 complaint about how it tasted, recommend what to change on the next one.
 
@@ -205,6 +271,24 @@ make is not useful even if the direction is right.
 When you have what you need, call submit_recommendation. Do not answer in prose."""
 
 
+COMMUNITY_SYSTEM_PROMPT = (
+    SYSTEM_PROMPT.replace(
+        "Ground the recommendation in this user's own history, not in generic "
+        "brewing advice.",
+        "Ground the recommendation in real brews rather than generic brewing "
+        "advice — this user's own first, and everyone else's where their "
+        "history runs out. get_community_brews is there for the coffee they "
+        "have brewed once and the gear they are new to.",
+    )
+    + """
+
+Other people's brews are evidence, but only about what their grouping says they \
+are. A grind number from a different grinder is not a smaller or larger version \
+of this user's number, it is a different scale entirely; ratio and temperature \
+carry across gear untouched. Say which brews you leaned on."""
+)
+
+
 class Toolbox:
     """Dispatches the data tools and records what each call returned.
 
@@ -219,18 +303,32 @@ class Toolbox:
         self._db = db
 
     def dispatch(
-        self, name: str, args: dict[str, Any], as_of: str
+        self,
+        name: str,
+        args: dict[str, Any],
+        as_of: str,
+        viewer_id: str | None = None,
     ) -> tuple[dict[str, Any], dict]:
-        """Run one tool call. Returns (payload for the model, trace entry)."""
+        """Run one tool call. Returns (payload for the model, trace entry).
+
+        `viewer_id` is whose brew is being diagnosed. Only the community tool
+        needs it — to leave that person's own brews out of "everyone else" —
+        and it refuses loudly when it is missing rather than quietly returning
+        the user their own history relabelled as the community's.
+        """
         started = time.monotonic()
         try:
-            payload = self._run(name, args, as_of)
-            error = None
+            payload = self._run(name, args, as_of, viewer_id)
         except Exception as exc:  # surfaced to the model, not raised
             payload = {"error": f"{type(exc).__name__}: {exc}"}
-            error = payload["error"]
+        # Read off the payload rather than set in the except branch: a tool that
+        # returns an error without raising — an unknown name, a missing viewer —
+        # is just as much a failed call, and the trace should say so.
+        error = payload.get("error")
 
         rows = payload.get("brews")
+        if rows is None and "groups" in payload:
+            rows = [b for group in payload["groups"] for b in group["brews"]]
         trace = {
             "tool": name,
             "arguments": args,
@@ -246,7 +344,44 @@ class Toolbox:
         }
         return payload, trace
 
-    def _run(self, name: str, args: dict[str, Any], as_of: str) -> dict[str, Any]:
+    def _run(
+        self,
+        name: str,
+        args: dict[str, Any],
+        as_of: str,
+        viewer_id: str | None = None,
+    ) -> dict[str, Any]:
+        if name == "get_community_brews":
+            if not viewer_id:
+                return {
+                    "error": (
+                        "get_community_brews needs to know whose brew this is "
+                        "so it can exclude them; the harness did not supply it."
+                    )
+                }
+            tiers = self._db.get_community_brews(
+                coffee_id=args["coffee_id"],
+                grinder_id=args["grinder_id"],
+                brewer_id=args["brewer_id"],
+                exclude_user=viewer_id,
+                min_rating=int(args.get("min_rating") or 2),
+                limit=int(args.get("limit") or 20),
+                as_of=as_of,
+            )
+            groups = [
+                {
+                    "match": tier,
+                    "what_transfers": TIER_GUIDANCE[tier],
+                    "brews": [b.to_tool_result() for b in tiers[tier]],
+                }
+                for tier in COMMUNITY_TIERS
+                if tiers[tier]
+            ]
+            return {
+                "groups": groups,
+                "found": sum(len(group["brews"]) for group in groups),
+            }
+
         if name == "get_brew":
             brew = self._db.get_brew(args["brew_id"], as_of=as_of)
             if brew is None:

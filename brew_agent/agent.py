@@ -43,10 +43,22 @@ class BrewAgent:
         client: anthropic.Anthropic,
         config: ModelConfig,
         toolbox: Toolbox,
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        name: str = "agent",
     ) -> None:
+        """The loop is the same whichever tools it is given.
+
+        `tools` and `system` are parameters so a rung can be added by handing
+        the same loop one more tool, rather than by editing the arm every other
+        run was measured against.
+        """
         self._client = client
         self._config = config
         self._toolbox = toolbox
+        self._tools = tools if tools is not None else ALL_TOOLS
+        self._system = system if system is not None else SYSTEM_PROMPT
+        self._name = name
 
     def run(self, brew: Brew, complaint: str) -> ArmResult:
         started = time.monotonic()
@@ -54,7 +66,7 @@ class BrewAgent:
             {"role": "user", "content": self._opening(brew, complaint)}
         ]
         trace: dict[str, Any] = {
-            "arm": "agent",
+            "arm": self._name,
             "model": self._config.model,
             "effort": self._config.effort,
             "brew_id": brew.id,
@@ -73,9 +85,9 @@ class BrewAgent:
                 response = call_model(
                     self._client,
                     self._config,
-                    system=SYSTEM_PROMPT,
+                    system=self._system,
                     messages=messages,
-                    tools=ALL_TOOLS,
+                    tools=self._tools,
                 )
             except Exception as exc:
                 recommendation = Recommendation(error=f"{type(exc).__name__}: {exc}")
@@ -158,7 +170,10 @@ class BrewAgent:
         blocks = []
         for call in calls:
             payload, tool_trace = self._toolbox.dispatch(
-                call.name, dict(call.input), as_of=brew.brew_timestamp
+                call.name,
+                dict(call.input),
+                as_of=brew.brew_timestamp,
+                viewer_id=brew.created_by,
             )
             step["tool_calls"].append(tool_trace)
             blocks.append(
@@ -188,7 +203,7 @@ class BrewAgent:
             response = call_model(
                 self._client,
                 self._config,
-                system=SYSTEM_PROMPT,
+                system=self._system,
                 messages=messages,
                 tools=[SUBMIT_RECOMMENDATION],
                 force_tool=SUBMIT_TOOL,
