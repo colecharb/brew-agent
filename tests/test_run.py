@@ -56,11 +56,11 @@ def test_results_file_is_written_and_parses(result):
     assert payload["sampled"] == 12
     assert payload["include_leaky"] is False
     assert set(payload["arms"]) == {"rules"}
-    # 372 pairs survive the filter chain; 40 of them (10.8%) state the next
+    # 372 pairs survive the filter chain; 105 of them (28%) state the next
     # adjustment in the notes and are excluded by default.
     assert payload["funnel"]["something_changed"] == 372
-    assert payload["funnel"]["leaky_excluded"] == 40
-    assert payload["funnel"]["eligible"] == 332
+    assert payload["funnel"]["leaky_excluded"] == 105
+    assert payload["funnel"]["eligible"] == 267
     assert len(payload["pairs"]) == 12
     assert all(p["leaky"] is False for p in payload["pairs"])
 

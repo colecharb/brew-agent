@@ -17,10 +17,12 @@ visible rather than implied:
   input.
 - **Something actually changed.** A pair where the user repeated themselves
   exactly has no adjustment to recover.
-- **No forward-looking language in the earlier notes.** Users often write down
-  what they plan to do next — "I'll dial this down to 485 microns next brew".
-  That is the answer, sitting in the input. Roughly 8% of otherwise-usable pairs
-  leak this way; scoring them would flatter every arm equally and mean nothing.
+- **No stated adjustment in the earlier notes.** Users write down what they plan
+  to change — "I'll dial this down to 485 microns next brew" — and also grade
+  the grind outright — "Sour, drying. Too coarse". Either way that is the answer
+  sitting in the input, and a model reads it perfectly while a keyword table
+  cannot, which would flatter exactly the arms under test. Those spans are
+  redacted rather than the pair being thrown away; see `LEAK_PATTERN`.
 """
 
 from __future__ import annotations
@@ -31,21 +33,46 @@ from dataclasses import dataclass, field
 
 from ..models import Brew, HoldoutPair
 
-# Phrases that state the next adjustment before it happens. Matches straight and
-# curly apostrophes — the app's users type both.
+# A note leaks when it names a PARAMETER CHANGE. Naming a taste outcome does
+# not: "just want a touch more body" is legitimate diagnosable input, while
+# "needs to be finer" is the answer. Both grammatical forms of the answer are
+# caught — the plan ("might push finer") and the verdict ("too fine") — because
+# a model reads both equally well.
+#
+# Matches straight and curly apostrophes; the app's users type both.
+#
+# This pattern is deliberately tuned for recall over precision. Roughly one in
+# ten matches is a past-tense description of the brew in hand rather than a plan
+# for the next one ("compared to last time, finer grind, hotter water"). Under
+# redaction that error costs one sentence of context, while a missed leak hands
+# an arm the answer — so the asymmetry runs the right way. Under `--exclude-leaky`
+# the same imprecision costs whole pairs, which is part of why redaction is the
+# default.
+_DIRECTION = r"(?:finer|coarser|coarsen|hotter|cooler|tighter|looser)"
+_INTENT = (
+    r"(?:could|can|may|might|will|would|should|need(?:s|ed)?\s+to|going\s+to|gonna"
+    r"|i['’]?ll|i['’]?d|try|tempted|curious|plan|anticipat\w+|consider\w*"
+    r"|push|bump|nudge|start)"
+)
+
 LEAK_PATTERN = re.compile(
-    r"\b("
-    r"next time|next brew|next one|next go"
-    r"|will (go|try|dial|grind|bump|drop|push)"
-    r"|going to (go|try|dial)"
-    r"|i['’]?ll (go|try|dial|bump|drop|push|grind)"
-    r"|i['’]?d (go|try|dial)"
-    r"|should (go|try|be) (finer|coarser|hotter|cooler|higher|lower)"
-    r"|try (finer|coarser|hotter|cooler|more|less|a )"
-    r"|(finer|coarser|hotter|cooler) next"
-    r"|dial (it |this )?(in|back|down|up)"
-    r"|split the difference"
-    r")\b",
+    # An intention followed by a direction, within one clause.
+    rf"\b{_INTENT}\b[^.!?\n]{{0,60}}?\b{_DIRECTION}\b"
+    # A direction pointed at a parameter or at the next brew.
+    rf"|\b{_DIRECTION}\s+(?:grind|setting|ratio|next|we\s+go|is\s+the\s+move)"
+    rf"|\b(?:grind|brew|go|push|bump)\s+(?:a\s+)?(?:touch\s+|hair\s+|bit\s+|little\s+)?{_DIRECTION}"
+    rf"|\d+\s*(?:um|micron?s?|clicks?)\s*{_DIRECTION}"
+    # The verdict form: grading the grind rather than planning a change.
+    r"|\btoo\s+(?:fine|coarse|hot|cold)\b"
+    r"|\b(?:not\s+)?(?:fine|coarse)\s+enough\b"
+    # Other parameters, same idea.
+    r"|\b(?:shorter|longer|tighter|extended)\s+ratio\b"
+    r"|\b(?:lower|higher)\s+temp\w*\b"
+    r"|\bcut\s+the\s+ratio\b|\btweak\s+(?:the\s+)?grind\b"
+    # Original phrasings, kept.
+    r"|\bnext\s+(?:time|brew|one|go)\b"
+    r"|\bdial\s+(?:it\s+|this\s+)?(?:in|back|down|up)\b"
+    r"|\bsplit\s+the\s+difference\b",
     re.IGNORECASE,
 )
 

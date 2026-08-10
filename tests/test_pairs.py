@@ -5,6 +5,8 @@ funnel changes and the suite fails loudly instead of the eval quietly measuring
 a different population.
 """
 
+import pytest
+
 from brew_agent.eval.pairs import (
     LEAK_PATTERN,
     build_pairs,
@@ -37,33 +39,74 @@ def test_leakage_is_excluded_by_default(seed_brews):
     without, stats = build_pairs(seed_brews)
 
     leaky = [p for p in with_leaky if p.leaky]
-    assert len(leaky) == stats.leaky_excluded == 40
-    assert len(without) == len(with_leaky) - len(leaky) == 332
-    # Roughly a tenth of otherwise-usable pairs state the answer in the input.
-    assert 0.05 < len(leaky) / len(with_leaky) < 0.15
+    assert len(leaky) == stats.leaky_excluded == 105
+    assert len(without) == len(with_leaky) - len(leaky) == 267
+    # Better than a quarter of otherwise-usable pairs state the answer in the
+    # input, counting both the plan form and the verdict form.
+    assert 0.20 < len(leaky) / len(with_leaky) < 0.35
     assert all(not p.leaky for p in without)
     assert leaky_stats.leaky_excluded == 0
 
 
-def test_leak_pattern_catches_real_examples():
-    for notes in [
-        "I'll dial this down to 485 microns next brew",
-        "Next brew I'd like to split the difference at 585.",
-        "Going to try coarser next for sure.",
-        "I will try bumping coarser next time",
-        "might try going a step coarser on the grind next time.",
-    ]:
-        assert LEAK_PATTERN.search(notes), notes
+STATED_PLANS = [
+    # Verbatim from supabase/seed.sql — the phrasings that motivated the filter.
+    "I'll dial this down to 485 microns next brew",
+    "Next brew I'd like to split the difference at 585.",
+    "Going to try coarser next for sure.",
+    "I will try bumping coarser next time",
+    "might try going a step coarser on the grind next time.",
+    "Really juicy. Think it could go a touch coarser",
+    "Still a touch bitter. Could nudge probably 10um coarser",
+    "It's possible I wasn't grinding coarse enough for this coffee",
+    "Clearly needs to be a little finer ground",
+    "My guess is that maybe 5-10 um coarser could open this brew up",
+    "Good structure, though can likely handle 1-2 clicks finer.",
+    "I think the longer ratio is better, as well as a coarser grind.",
+    "Little sour on the finish, might push finer.",
+    "Metallic sourness. Something tells me to try much coarser",
+    "Still very tasty but leaning tart Finer is the move",
+    "Perfumy, red grape. Pretty roasty. May try this at a lower temp",
+    "Still needs to be coarser I think.",
+    "Tasted best near room temp. Grind coarser (7.5), with 94C.",
+    "flavours a little muted. Shorter ratio and/or finer grind?",
+    "Well balanced but a little intense. Tweak grind to 26.",
+    "I think I need to cut the ratio down and go even faster",
+]
+
+# The same answer in the other grammar: grading the grind rather than planning a
+# change. A model reads these just as well, so they leak just as much.
+STATED_VERDICTS = [
+    "Sour, drying. Too coarse",
+    "Papery, tart. Hint of sweetness. Too coarse, also very fresh",
+    "A bit muddy, grind probably still too fine",
+    "I was definitely too fine, and I think I still am.",
+]
+
+# Taste outcomes. These are the legitimate input and must survive redaction.
+TASTE_ONLY = [
+    "Sour and thin, watery body.",
+    "Bitter and drying on the finish.",
+    "Lovely florals, syrupy. Best one yet.",
+    "Fast drawdown but didn't taste under extracted.",
+    "Surprisingly nice actually! Just want a touch more body and sweetness.",
+    "Currant. Super vibrant, maybe a little too much so.",
+    "Big time apple, good acidity/sweetness balance.",
+    "Body and zing both!",
+    # Grinder maintenance is not a brew parameter.
+    "Heavy body and slightly tart. Grinder may need a more thorough clean.",
+    "Decent acidity but not great separation. Cleaning the grinder and trying again.",
+]
 
 
-def test_leak_pattern_leaves_plain_tasting_notes_alone():
-    for notes in [
-        "Sour and thin, watery body.",
-        "Bitter and drying on the finish.",
-        "Lovely florals, syrupy. Best one yet.",
-        "Fast drawdown but didn't taste under extracted.",
-    ]:
-        assert not LEAK_PATTERN.search(notes), notes
+@pytest.mark.parametrize("notes", STATED_PLANS + STATED_VERDICTS)
+def test_leak_pattern_catches_real_examples(notes):
+    assert LEAK_PATTERN.search(notes), notes
+
+
+@pytest.mark.parametrize("notes", TASTE_ONLY)
+def test_leak_pattern_leaves_tasting_notes_alone(notes):
+    match = LEAK_PATTERN.search(notes)
+    assert not match, f"{notes!r} matched on {match.group(0)!r}"
 
 
 def test_pairs_are_same_user_coffee_and_setup(seed_brews):
@@ -84,8 +127,8 @@ def test_ground_truth_has_signal(seed_brews):
         p for p in pairs if p.before.grind_value != p.after.grind_value
     ]
     improved = [p for p in pairs if p.rating_improved]
-    assert len(grind_changed) > 150
-    assert len(improved) > 100
+    assert len(grind_changed) > 100
+    assert len(improved) > 75
 
 
 def test_stratified_sample_spreads_across_users(seed_brews):
