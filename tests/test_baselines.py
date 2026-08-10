@@ -1,8 +1,12 @@
 """The rule table and prompt building — the parts that need no API key."""
 
+import anthropic
+import httpx
 import pytest
 
-from brew_agent.baselines import build_prompt, describe_brew, run_rules
+from brew_agent import baselines
+from brew_agent.baselines import build_prompt, call_model, describe_brew, run_rules
+from brew_agent.config import ModelConfig
 from brew_agent.models import Brew
 
 
@@ -122,6 +126,88 @@ class TestPrompt:
 
     def test_ratio_is_derived(self):
         assert "ratio 16.7:1" in describe_brew(brew(dose=15.0, yield_g=250.0))
+
+
+def bad_request(message: str) -> anthropic.BadRequestError:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.BadRequestError(
+        message, response=httpx.Response(400, request=request), body=None
+    )
+
+
+class RejectingMessages:
+    """Rejects the first call with a given error, then accepts."""
+
+    def __init__(self, error: anthropic.BadRequestError) -> None:
+        self._error = error
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            raise self._error
+        return "ok"
+
+
+class RejectingClient:
+    def __init__(self, error: anthropic.BadRequestError) -> None:
+        self.messages = RejectingMessages(error)
+
+
+def call(client, effort=None, force_tool=None):
+    config = ModelConfig(
+        api_key="test", model="claude-haiku-4-5", effort=effort, max_iterations=6
+    )
+    return call_model(
+        client, config, system="s", messages=[], tools=[], force_tool=force_tool
+    )
+
+
+class TestUnsupportedParametersDegradeRatherThanFail:
+    """Smaller models reject parameters the frontier ones accept.
+
+    Without this the eval fails every pair identically on a model-capability
+    mismatch — an expensive way to learn that `effort` isn't universal.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_warnings(self):
+        baselines._warned.clear()
+
+    def test_effort_is_dropped_and_the_call_retried(self):
+        client = RejectingClient(
+            bad_request("output_config.effort: unsupported on this model")
+        )
+        assert call(client, effort="high") == "ok"
+        first, second = client.messages.calls
+        assert first["output_config"] == {"effort": "high"}
+        assert "output_config" not in second
+
+    def test_dropping_effort_is_announced(self, capsys):
+        client = RejectingClient(bad_request("output_config.effort: unsupported"))
+        call(client, effort="high")
+        assert "not comparable" in capsys.readouterr().err
+
+    def test_the_warning_fires_once_across_many_calls(self, capsys):
+        for _ in range(5):
+            call(RejectingClient(bad_request("output_config.effort: bad")), effort="high")
+        assert capsys.readouterr().err.count("warning:") == 1
+
+    def test_a_forced_tool_is_still_dropped_on_its_own_error(self):
+        client = RejectingClient(bad_request("tool_choice: not allowed here"))
+        assert call(client, force_tool="submit_recommendation") == "ok"
+        assert "tool_choice" not in client.messages.calls[1]
+
+    def test_an_unrelated_bad_request_still_raises(self):
+        """Only the two known-survivable rejections are absorbed."""
+        client = RejectingClient(bad_request("messages: must not be empty"))
+        with pytest.raises(anthropic.BadRequestError):
+            call(client, effort="high")
+
+    def test_nothing_is_dropped_when_effort_was_never_sent(self):
+        client = RejectingClient(bad_request("output_config.effort: unsupported"))
+        with pytest.raises(anthropic.BadRequestError):
+            call(client)
 
 
 def test_rule_table_survives_every_real_brew(seed_brews):

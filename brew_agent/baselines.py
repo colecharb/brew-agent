@@ -23,6 +23,8 @@ either cause.
 from __future__ import annotations
 
 import re
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,6 +34,23 @@ import anthropic
 from .config import MAX_TOKENS, ModelConfig
 from .models import Brew, Recommendation
 from .tools import SUBMIT_RECOMMENDATION, SUBMIT_TOOL, SYSTEM_PROMPT
+
+_warned: set[str] = set()
+_warn_lock = threading.Lock()
+
+
+def warn_once(message: str) -> None:
+    """Print a warning the first time it happens, not once per pair.
+
+    Pairs run concurrently and a model-capability mismatch affects every call
+    equally, so without this the same line would land a few hundred times and
+    bury the results table.
+    """
+    with _warn_lock:
+        if message in _warned:
+            return
+        _warned.add(message)
+    print(f"warning: {message}", file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -453,11 +472,23 @@ def call_model(
     try:
         return client.messages.create(**kwargs)
     except anthropic.BadRequestError as exc:
+        detail = str(exc).lower()
         # Forcing a specific tool is not accepted in every model/thinking
         # combination. Losing the forcing is survivable — the prompt already
         # asks for the tool — so retry once rather than failing the call.
-        if force_tool and "tool_choice" in str(exc).lower():
+        if force_tool and "tool_choice" in detail:
             kwargs.pop("tool_choice")
+            return client.messages.create(**kwargs)
+        # Smaller models have no effort parameter at all, and rejecting it
+        # would otherwise fail every pair identically. Dropping it is the only
+        # way to run them, so run — but say so, because a run without effort is
+        # not spending the same test-time compute as one with it.
+        if "effort" in detail and "output_config" in kwargs:
+            warn_once(
+                f"{config.model} rejected output_config.effort; continuing "
+                f"without it. This run is not comparable to one that set it."
+            )
+            kwargs.pop("output_config")
             return client.messages.create(**kwargs)
         raise
 
