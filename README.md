@@ -29,18 +29,28 @@ It prints one row per arm:
 
 ```
 All sampled pairs
-arm           n |   ok  wrong  quiet    dir |     magnitude |   when improved |  held  err
-------------------------------------------------------------------------------------------
-rules        60 |   10      4     25   26% |    6/10   60% |      5/16   31% |    41    0
+arm           n |   ok  wrong  quiet  elsew    dir |     magnitude |   when improved |  held  err
+-------------------------------------------------------------------------------------------------
+rules        60 |   11      4     24      0   28% |    7/11   64% |      5/16   31% |    41    0
 
 Pairs whose note describes a taste problem
-arm           n |   ok  wrong  quiet    dir |     magnitude |   when improved |  held  err
-------------------------------------------------------------------------------------------
-rules        15 |    6      3      3   50% |     4/6   67% |       3/6   50% |     2    0
+arm           n |   ok  wrong  quiet  elsew    dir |     magnitude |   when improved |  held  err
+-------------------------------------------------------------------------------------------------
+rules        15 |    6      3      3      0   50% |     4/6   67% |       3/6   50% |     2    0
+
+What each arm bet on
+  rules      grind_setting 19, none 41
 ```
 
 - **ok / wrong / quiet** — over the pairs where the user moved the grind: moved
   it the same way, moved it the opposite way, or recommended no grind change.
+- **elsew** — of those quiet pairs, how many proposed a *different* lever
+  instead. Still a miss on grind, but an opinion about temperature is not the
+  same thing as having none, and only some arms can tell them apart: `rules` and
+  `classify` reach for the grind or for nothing, so this column is always 0 for
+  them. Without the split, the `classify` → `no_tools` rung reads as a
+  capability gap when part of it is the arms with lever choice being penalised
+  for using it.
 - **dir** — `ok / (ok + wrong + quiet)`. Staying quiet counts as a miss, so a
   conservative arm cannot hide. The first row reads: the rule table is right
   about two thirds of the time *when it speaks*, but it has nothing to say on
@@ -57,6 +67,13 @@ Clemi's latte"*, *"Fantastic. So open and sweet."* The user moved the grind for
 reasons never written down, and no arm can be right about those. Scoring them
 drags every arm toward the same middle, which is why the same rule table reads
 26% across all pairs and 50% on the ones where a right answer exists.
+
+Pairs are evaluated six at a time (`--concurrency`,
+`BREW_AGENT_EVAL_CONCURRENCY`), which takes a four-arm hundred-pair run from
+over an hour to about ten minutes. Completion order is nondeterministic but the
+artefacts are not: scores are collected in sample order once the pool drains, so
+a parallel run and a serial one produce byte-identical results. `--concurrency 1`
+forces strict order.
 
 Useful flags: `--arms rules` (no API key needed), `--label`, `--exclude-leaky`,
 `--include-leaky` (all below).
@@ -188,6 +205,15 @@ assumption worth naming — that a higher grind number means coarser. That holds
 for microns and most dials, but it is exactly the guess the agent is meant to
 avoid by reading the user's own history. Where it is wrong, this arm is
 confidently backwards, which is the point of having it.
+
+The fixed step has a floor, for a reason worth knowing about if you change it. A
+percentage is not expressible on a coarse dial: 5% of 7 is 0.35, and a
+whole-number grinder rounds that straight back to 7. Both fixed-step arms then
+returned a confident recommendation of the setting already in use, which scores
+as an abstention and is indistinguishable from having had no opinion — a silent
+loss on 15 of the 367 pairs, all of them dials between 4 and 10. Where a
+percentage rounds away the step is now the smallest increment the dial can
+express; where 5% is expressible it is still exactly 5%.
 
 ## Tools
 
