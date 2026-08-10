@@ -8,7 +8,9 @@ import json
 
 import pytest
 
-from brew_agent.eval.run import main, print_report, run_eval
+from brew_agent.baselines import run_rules
+from brew_agent.eval.pairs import REDACT, build_pairs
+from brew_agent.eval.run import Runner, _run_one_pair, main, print_report, run_eval
 
 
 class SeedDatabase:
@@ -179,6 +181,79 @@ class TestDiagnosableSubset:
         out = capsys.readouterr().out
         assert "All sampled pairs" in out
         assert "note describes a taste problem" in out
+
+
+class TestPairsRunConcurrently:
+    """Pairs go out in parallel. None of the numbers may depend on that."""
+
+    @staticmethod
+    def _run(seed_brews, tmp_path, tag, concurrency):
+        return run_eval(
+            SeedDatabase(seed_brews),
+            names=["rules"],
+            n=16,
+            trace_root=tmp_path / f"t{tag}",
+            output_root=tmp_path / f"o{tag}",
+            concurrency=concurrency,
+        )
+
+    def test_serial_and_parallel_agree(self, seed_brews, tmp_path):
+        serial = self._run(seed_brews, tmp_path, "s", 1)
+        parallel = self._run(seed_brews, tmp_path, "p", 8)
+        assert (
+            serial["scores"]["rules"].to_dict()
+            == parallel["scores"]["rules"].to_dict()
+        )
+
+    def test_the_results_file_stays_in_sample_order(self, seed_brews, tmp_path):
+        """Completion order is nondeterministic; the artefact must not be."""
+        serial = json.loads(self._run(seed_brews, tmp_path, "s", 1)["output_path"].read_text())
+        parallel = json.loads(self._run(seed_brews, tmp_path, "p", 8)["output_path"].read_text())
+        assert [p["pair_id"] for p in serial["pairs"]] == [
+            p["pair_id"] for p in parallel["pairs"]
+        ]
+
+    def test_each_result_stays_with_its_own_pair(self, seed_brews, tmp_path):
+        """The real hazard of the fan-out: an answer filed against a neighbour.
+
+        `rules` is deterministic, so every trace can be recomputed from the pair
+        it claims to be about and checked against what was written.
+        """
+        result = self._run(seed_brews, tmp_path, "x", 8)
+        pairs = {p.id: p for p in build_pairs(seed_brews, leak_mode=REDACT)[0]}
+
+        traces = list(result["trace_dir"].glob("rules-*.json"))
+        assert len(traces) == 16
+        for path in traces:
+            payload = json.loads(path.read_text())
+            pair = pairs[payload["pair_id"]]
+            assert path.name == f"rules-{pair.id}.json"
+            assert payload["input"]["brew_id"] == pair.before.id
+            expected = run_rules(pair.before, pair.complaint).recommendation
+            assert payload["recommendation"]["grind_setting"] == expected.grind_setting
+            assert payload["recommendation"]["reasoning"] == expected.reasoning
+
+
+def test_an_exploding_arm_is_scored_rather_than_losing_the_pair(seed_brews):
+    """One arm failing must not discard the other arms' work on that pair."""
+
+    def boom(pair):
+        raise RuntimeError("connection reset by peer")
+
+    pair = build_pairs(seed_brews, leak_mode=REDACT)[0][0]
+    answers = _run_one_pair(
+        [
+            Runner("rules", lambda p: run_rules(p.before, p.complaint)),
+            Runner("boom", boom),
+            Runner("rules2", lambda p: run_rules(p.before, p.complaint)),
+        ],
+        pair,
+    )
+
+    assert [name for name, _, _ in answers] == ["rules", "boom", "rules2"]
+    scores = {name: score for name, _, score in answers}
+    assert "connection reset by peer" in scores["boom"].error
+    assert scores["rules"].error is None and scores["rules2"].error is None
 
 
 class TestMisquotedEvidenceIsReported:

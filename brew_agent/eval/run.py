@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from ..baselines import ArmResult, ClassifyBaseline, NoToolsBaseline, run_rules
 from ..config import LABEL_CACHE, OUTPUT_DIR, TRACE_DIR, ConfigError, ModelConfig
-from ..models import HoldoutPair
+from ..models import HoldoutPair, Recommendation
 from ..tools import Toolbox
 from .pairs import EXCLUDE, RAW, REDACT, PairStats, build_pairs, stratified_sample
 from .scoring import ArmScore, PairScore, aggregate, score_pair
@@ -26,6 +28,11 @@ from .scoring import ArmScore, PairScore, aggregate, score_pair
 # Ordered as a ladder: each rung adds one capability to the one before it.
 ARMS = ("rules", "classify", "no_tools", "agent")
 NEEDS_API_KEY = ("classify", "no_tools", "agent")
+
+# Pairs in flight. Each one carries a full agent loop, so this is also the
+# number of concurrent readers the database sees. Six turns a four-arm hundred-
+# pair run from over an hour into about ten minutes; lower it on rate limits.
+DEFAULT_CONCURRENCY = int(os.environ.get("BREW_AGENT_EVAL_CONCURRENCY", "6"))
 
 
 class SupportsBrewReads(Protocol):
@@ -77,6 +84,32 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
     return sorted(runners, key=lambda r: names.index(r.name))
 
 
+def _run_one_pair(
+    runners: list[Runner], pair: HoldoutPair
+) -> list[tuple[str, ArmResult, PairScore]]:
+    """Every arm's answer for one pair.
+
+    Pairs are the unit of parallelism: nothing an arm learns on one carries to
+    another, and the time cutoff means none of them can see each other's data
+    either. Arms stay sequential within a pair, so the database sees one agent
+    loop per pair in flight rather than one per arm.
+    """
+    answers = []
+    for runner in runners:
+        try:
+            result = runner.run(pair)
+        except Exception as exc:
+            # Each arm already turns an API failure into a scored miss. This is
+            # the backstop that stops one unexpected error at pair 80 of 100
+            # discarding a run that has already been paid for.
+            result = ArmResult(
+                recommendation=Recommendation(error=f"{type(exc).__name__}: {exc}"),
+                trace={"arm": runner.name, "error": str(exc)},
+            )
+        answers.append((runner.name, result, score_pair(pair, result.recommendation)))
+    return answers
+
+
 def run_eval(
     db: SupportsBrewReads,
     names: list[str],
@@ -85,6 +118,7 @@ def run_eval(
     labels: Mapping[str, Any] | None = None,
     trace_root: Path | None = None,
     output_root: Path | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> dict:
     """Fetch, pair, sample, run every arm, score, and write the artefacts."""
     runners = build_runners(names, db)
@@ -104,17 +138,28 @@ def run_eval(
     # Arms that quote the note back are checked against it. Nothing here changes
     # a score — it is the trace's honesty that is being counted.
     odd_evidence: dict[str, int] = {}
-    for index, pair in enumerate(sample, start=1):
-        print(f"[{index}/{len(sample)}] {pair.id}", end="", flush=True)
-        for runner in runners:
-            result = runner.run(pair)
-            score = score_pair(pair, result.recommendation)
-            per_arm[runner.name].append(score)
+    finished: dict[int, list[tuple[str, ArmResult, PairScore]]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        pending = {
+            pool.submit(_run_one_pair, runners, pair): index
+            for index, pair in enumerate(sample)
+        }
+        for done, future in enumerate(as_completed(pending), start=1):
+            index = pending[future]
+            finished[index] = future.result()
+            marks = "  ".join(
+                f"{name}={score.grind}" for name, _, score in finished[index]
+            )
+            print(f"[{done}/{len(sample)}] {sample[index].id}  {marks}", flush=True)
+
+    # Completion order is nondeterministic; the results file must not be. Scores
+    # are collected in sample order regardless of who finished first.
+    for index, pair in enumerate(sample):
+        for name, result, score in finished[index]:
+            per_arm[name].append(score)
             if result.trace.get("evidence_verbatim") is False:
-                odd_evidence[runner.name] = odd_evidence.get(runner.name, 0) + 1
-            _write_trace(trace_dir, runner.name, pair, result, score)
-            print(f"  {runner.name}={score.grind}", end="", flush=True)
-        print()
+                odd_evidence[name] = odd_evidence.get(name, 0) + 1
+            _write_trace(trace_dir, name, pair, result, score)
 
     scores = {name: aggregate(name, s) for name, s in per_arm.items()}
     # Many notes are "Yes." or "For Clemi's latte" — the user moved the grind
@@ -337,6 +382,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.set_defaults(leak_mode=REDACT)
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help=(
+            f"pairs evaluated in parallel (default {DEFAULT_CONCURRENCY}, or "
+            f"BREW_AGENT_EVAL_CONCURRENCY). Use 1 to run strictly in order."
+        ),
+    )
+    parser.add_argument(
         "--label",
         action="store_true",
         help=(
@@ -362,7 +416,14 @@ def main(argv: list[str] | None = None) -> int:
         db = BrewDatabase.connect()
         print(f"signed in as {db.user_id}")
         labels = _label_notes(db) if args.label else None
-        result = run_eval(db, seen, args.n, leak_mode=args.leak_mode, labels=labels)
+        result = run_eval(
+            db,
+            seen,
+            args.n,
+            leak_mode=args.leak_mode,
+            labels=labels,
+            concurrency=args.concurrency,
+        )
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
