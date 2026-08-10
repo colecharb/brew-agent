@@ -166,6 +166,21 @@ else — no grind setting, no dose, no gear — and it is offered only
 `classify_taste`, never `submit_recommendation`. That is what stops it quietly
 becoming `no_tools`.
 
+Its two abstaining verdicts, `both` and `neither`, recommend nothing and so are
+between them the only way this arm loses without ever being wrong. The first
+version of its brief said *"judge only what the note says about flavour"* and
+twice more encouraged it to say nothing when unsure — and the arm duly returned
+`neither` on a note opening *"Shot pulled way too fast"*, an unambiguous
+under-extraction call containing no flavour word at all. It scored below the
+keyword table it exists to beat, which was a result about the brief and not
+about reading. The brief now admits evidence about how the brew ran, warns that
+real notes rarely use the textbook words, and scopes both ways out narrowly.
+
+What it does not do is mention the scoring. A model told that silence is
+penalised will guess to protect the number rather than read the note, and the
+rung stops measuring anything. The prompt describes the task; the metric stays
+outside it.
+
 `rules` stays rather than being replaced by `classify`, because it is the only
 rung with no model in it at all. Without it, a gap between keyword matching and
 a full recommender could not be attributed to either cause. It carries one
@@ -252,6 +267,14 @@ each step, token usage, and the final recommendation with its score.
 They are readable end to end without cross-referencing anything. They also
 contain other users' tasting notes, since brews are public — `traces/` and
 `evals/output/` are gitignored, so keep them local.
+
+Where an arm quotes the note back — `classify`'s `evidence` field — the quote is
+checked against the note it read and the trace records `evidence_verbatim`. One
+live call returned a malformed token fragment there instead of a quote. It cost
+no accuracy, because only the verdict feeds the arithmetic, which is exactly how
+it went unnoticed for a whole run; what it cost was the trace's standing as an
+account of the answer. The per-arm count of misquotes is printed after the
+tables, so a recurrence is visible without grepping.
 
 ## Tests
 
