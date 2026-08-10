@@ -130,6 +130,57 @@ def test_traces_show_what_was_redacted(result):
     assert all("raw_notes" not in p["input"] for p in payloads)
 
 
+class TestDiagnosableSubset:
+    """The second table: only the pairs where a right answer exists.
+
+    Many notes are "Yes." or "For Clemi's latte" — the grind moved for reasons
+    never written down. Scoring those pulls every arm toward the same middle.
+    """
+
+    @staticmethod
+    def _labelled(seed_brews, tmp_path, tag="d"):
+        from brew_agent.eval.labels import NoteLabel
+
+        # Stand in for the labelling pass: call a note diagnosable when it has
+        # any extraction vocabulary in it.
+        labels = {
+            b.id: NoteLabel(
+                states_adjustment=False,
+                adjustment_quotes=[],
+                has_complaint=any(
+                    w in b.notes.lower() for w in ("sour", "bitter", "thin", "harsh")
+                ),
+            )
+            for b in seed_brews
+        }
+        return run_eval(
+            SeedDatabase(seed_brews), ["rules"], n=40, labels=labels,
+            trace_root=tmp_path / tag, output_root=tmp_path / tag,
+        )
+
+    def test_absent_without_labels(self, result):
+        assert not result.get("diagnosable")
+
+    def test_present_and_smaller_with_labels(self, seed_brews, tmp_path):
+        labelled = self._labelled(seed_brews, tmp_path)
+        assert labelled["diagnosable"]
+        overall = labelled["scores"]["rules"]
+        subset = labelled["diagnosable"]["rules"]
+        assert 0 < subset.n < overall.n
+
+    def test_written_to_the_results_file(self, seed_brews, tmp_path):
+        labelled = self._labelled(seed_brews, tmp_path, tag="e")
+        payload = json.loads(labelled["output_path"].read_text())
+        assert set(payload["arms_diagnosable_only"]) == {"rules"}
+        assert payload["funnel"]["labelled"] is True
+
+    def test_both_tables_print(self, seed_brews, tmp_path, capsys):
+        print_report(self._labelled(seed_brews, tmp_path, tag="f"))
+        out = capsys.readouterr().out
+        assert "All sampled pairs" in out
+        assert "note describes a taste problem" in out
+
+
 def test_unknown_arm_is_rejected_before_connecting():
     """Fails on the argument, not on a missing database connection."""
     with pytest.raises(SystemExit) as exc:

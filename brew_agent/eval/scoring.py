@@ -74,6 +74,9 @@ class PairScore:
 
     pair_id: str
     user_id: str
+    # From the model labelling pass: does the note describe a taste problem at
+    # all? None when the labeller hasn't run.
+    diagnosable: bool | None = None
     grind: str = NOT_APPLICABLE
     magnitude_ratio: float | None = None
     magnitude_hit: bool | None = None
@@ -88,6 +91,7 @@ class PairScore:
         return {
             "pair_id": self.pair_id,
             "user_id": self.user_id,
+            "diagnosable": self.diagnosable,
             "grind": self.grind,
             "magnitude_ratio": self.magnitude_ratio,
             "magnitude_hit": self.magnitude_hit,
@@ -106,6 +110,7 @@ def score_pair(pair: HoldoutPair, rec: Recommendation) -> PairScore:
     score = PairScore(
         pair_id=pair.id,
         user_id=pair.user_id,
+        diagnosable=pair.diagnosable,
         rating_improved=pair.rating_improved,
         recommended_nothing=rec.changes_nothing,
         error=rec.error,

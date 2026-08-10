@@ -112,6 +112,15 @@ def run_eval(
         print()
 
     scores = {name: aggregate(name, s) for name, s in per_arm.items()}
+    # Many notes are "Yes." or "For Clemi's latte" — the user moved the grind
+    # for reasons never written down, and no arm can be right about those.
+    # Scoring them pulls every arm toward the same middle, so where the labeller
+    # has told us which notes describe a taste problem, report that subset too.
+    diagnosable = {
+        name: aggregate(name, [s for s in per_arm[name] if s.diagnosable])
+        for name in per_arm
+        if any(s.diagnosable is not None for s in per_arm[name])
+    }
     out_path = output_dir / f"{run_id}.json"
     out_path.write_text(
         json.dumps(
@@ -121,6 +130,9 @@ def run_eval(
                 "leak_mode": leak_mode,
                 "funnel": dict(stats.__dict__),
                 "arms": {name: arm.to_dict() for name, arm in scores.items()},
+                "arms_diagnosable_only": {
+                    name: arm.to_dict() for name, arm in diagnosable.items()
+                },
                 "pairs": [
                     {"pair_id": p.id, "user_id": p.user_id, "leaky": p.leaky}
                     for p in sample
@@ -134,6 +146,7 @@ def run_eval(
         "run_id": run_id,
         "stats": stats,
         "scores": scores,
+        "diagnosable": diagnosable,
         "output_path": out_path,
         "trace_dir": trace_dir,
     }
@@ -147,20 +160,14 @@ def _fraction(correct: int, total: int) -> str:
     return f"{correct}/{total}" if total else "  -  "
 
 
-def print_report(result: dict) -> None:
-    stats: PairStats = result["stats"]
-    scores: dict[str, ArmScore] = result["scores"]
-
-    print("\nPair selection")
-    for line in stats.funnel_lines():
-        print(line)
-
+def _print_table(title: str, scores: Mapping[str, ArmScore]) -> None:
     header = (
-        f"\n{'arm':<10} {'n':>4} | {'ok':>4} {'wrong':>6} {'quiet':>6} {'dir':>6} "
+        f"{'arm':<10} {'n':>4} | {'ok':>4} {'wrong':>6} {'quiet':>6} {'dir':>6} "
         f"| {'magnitude':>13} | {'when improved':>15} | {'held':>5} {'err':>4}"
     )
+    print(f"\n{title}")
     print(header)
-    print("-" * (len(header) - 1))
+    print("-" * len(header))
     for name, arm in scores.items():
         print(
             f"{name:<10} {arm.n:>4} | "
@@ -171,6 +178,21 @@ def print_report(result: dict) -> None:
             f"{_fraction(arm.grind_when_improved.correct, arm.grind_when_improved.considered):>9} "
             f"{_pct(arm.headline)} | "
             f"{arm.recommended_nothing:>5} {arm.errors:>4}"
+        )
+
+
+def print_report(result: dict) -> None:
+    stats: PairStats = result["stats"]
+    scores: dict[str, ArmScore] = result["scores"]
+
+    print("\nPair selection")
+    for line in stats.funnel_lines():
+        print(line)
+
+    _print_table("All sampled pairs", scores)
+    if result.get("diagnosable"):
+        _print_table(
+            "Pairs whose note describes a taste problem", result["diagnosable"]
         )
 
     print(
