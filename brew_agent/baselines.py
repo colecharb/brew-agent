@@ -1,10 +1,23 @@
-"""The two things the agent has to beat.
+"""The three rungs below the agent.
 
-`rules` is a static keyword table with no model and no data access. `no_tools`
-is a single model call with the brew's parameters and the complaint, but no
-history to ground itself in. Between them they separate "did the LLM help" from
-"did the retrieval help": if the agent doesn't beat `no_tools`, the tools aren't
-earning their cost; if `no_tools` doesn't beat `rules`, the model isn't either.
+Each adds exactly one capability to the one before it, so the gap between any
+two rungs prices that one thing:
+
+| arm        | reads the note | picks the change | reads history |
+|------------|----------------|------------------|---------------|
+| `rules`    | keyword table  | fixed +/-5%      | no            |
+| `classify` | **model**      | fixed +/-5%      | no            |
+| `no_tools` | model          | **model**        | no            |
+| `agent`    | model          | model            | **3 tools**   |
+
+`rules` -> `classify` is the value of language understanding. `classify` ->
+`no_tools` is the value of letting the model choose the size and the lever.
+`no_tools` -> `agent` is the value of retrieval.
+
+Keeping `rules` rather than replacing its vocabulary list with the classifier is
+deliberate: it is the only rung with no model in it at all, and without it a gap
+between keyword matching and a full recommender could not be attributed to
+either cause.
 """
 
 from __future__ import annotations
@@ -165,7 +178,138 @@ def _apply_step(
     return rec
 
 
-# --- arm 2: one model call, no data ---------------------------------------
+# --- arm 2: model reads the note, the rule table does the arithmetic -------
+
+UNDER, OVER, BOTH, NEITHER = (
+    "under_extracted",
+    "over_extracted",
+    "both",
+    "neither",
+)
+
+CLASSIFY_TOOL = "classify_taste"
+
+CLASSIFY_TASTE: dict[str, Any] = {
+    "name": CLASSIFY_TOOL,
+    "description": "Record what the tasting note says about extraction.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": [UNDER, OVER, BOTH, NEITHER],
+                "description": (
+                    "under_extracted when the note describes sourness, "
+                    "thinness, weakness, a lack of sweetness or body, or a "
+                    "hollow, salty or grassy character. over_extracted when it "
+                    "describes bitterness, harshness, astringency, drying or "
+                    "ashy flavours, or a muddy, heavy cup. both when it "
+                    "genuinely describes each. neither when the note is "
+                    "positive, or says nothing about how the coffee tasted."
+                ),
+            },
+            "evidence": {
+                "type": "string",
+                "description": (
+                    "The words in the note that decided it, quoted. Empty for "
+                    "neither."
+                ),
+            },
+        },
+        "required": ["verdict", "evidence"],
+        "additionalProperties": False,
+    },
+}
+
+CLASSIFY_SYSTEM = """You read a coffee tasting note and say whether it describes \
+an under-extracted or an over-extracted cup.
+
+Under-extraction tastes sour, thin, weak, hollow, salty, or grassy — the cup is \
+missing sweetness and body. Over-extraction tastes bitter, harsh, astringent, \
+drying, or ashy — too much has been pulled out.
+
+Judge only what the note says about flavour. Plenty of notes are positive, or \
+are not about taste at all ("for the morning latte"); those are neither, and \
+saying so is the right answer rather than a failure. Do not guess at a verdict \
+the words don't support.
+
+Call classify_taste. Do not answer in prose."""
+
+
+class ClassifyBaseline:
+    """A model reads the note; the rule table still does the arithmetic.
+
+    The prompt carries the note and **nothing else** — no grind setting, no
+    dose, no gear. That is what keeps this a classifier rather than a second
+    recommender, and it is why the arm cannot quietly turn into `no_tools`.
+
+    The verdict then feeds the same `_apply_step` the keyword table uses, with
+    the same 5% step, the same 2C, and the same "higher number is coarser"
+    assumption. Every downstream variable is held constant, so the gap against
+    `rules` is language understanding and nothing else.
+    """
+
+    def __init__(self, client: anthropic.Anthropic, config: ModelConfig) -> None:
+        self._client = client
+        self._config = config
+
+    def run(self, brew: Brew, complaint: str) -> ArmResult:
+        started = time.monotonic()
+        try:
+            response = call_model(
+                self._client,
+                self._config,
+                system=CLASSIFY_SYSTEM,
+                messages=[{"role": "user", "content": complaint.strip()}],
+                tools=[CLASSIFY_TASTE],
+                force_tool=CLASSIFY_TOOL,
+            )
+        except Exception as exc:
+            return ArmResult(
+                recommendation=Recommendation(error=f"{type(exc).__name__}: {exc}"),
+                trace={"arm": "classify", "error": str(exc)},
+            )
+
+        verdict, evidence = _read_verdict(response)
+        if verdict == UNDER:
+            rec = _apply_step(brew, finer=True, matched=[evidence], verdict=verdict)
+        elif verdict == OVER:
+            rec = _apply_step(brew, finer=False, matched=[evidence], verdict=verdict)
+        else:
+            # `both` and `neither` recommend nothing, exactly as the keyword
+            # table does when its two lists collide.
+            rec = Recommendation(
+                reasoning=f"Classified {verdict}; no single-lever rule applies."
+            )
+            if verdict is None:
+                rec.error = f"no {CLASSIFY_TOOL} call (stop_reason={response.stop_reason})"
+
+        return ArmResult(
+            recommendation=rec,
+            trace={
+                "arm": "classify",
+                "model": self._config.model,
+                "verdict": verdict,
+                "evidence": evidence,
+                "stop_reason": response.stop_reason,
+                "usage": usage_of(response),
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "recommendation": rec.to_dict(),
+            },
+        )
+
+
+def _read_verdict(response: Any) -> tuple[str | None, str]:
+    if response.stop_reason == "refusal":
+        return None, ""
+    for block in response.content:
+        if block.type == "tool_use" and block.name == CLASSIFY_TOOL:
+            return block.input.get("verdict"), block.input.get("evidence") or ""
+    return None, ""
+
+
+# --- arm 3: one model call, no data ---------------------------------------
 
 NO_TOOLS_SYSTEM = (
     SYSTEM_PROMPT.split("Ground the recommendation")[0].strip()

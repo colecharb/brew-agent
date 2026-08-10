@@ -16,15 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from ..baselines import ArmResult, NoToolsBaseline, run_rules
+from ..baselines import ArmResult, ClassifyBaseline, NoToolsBaseline, run_rules
 from ..config import LABEL_CACHE, OUTPUT_DIR, TRACE_DIR, ConfigError, ModelConfig
 from ..models import HoldoutPair
 from ..tools import Toolbox
 from .pairs import EXCLUDE, RAW, REDACT, PairStats, build_pairs, stratified_sample
 from .scoring import ArmScore, PairScore, aggregate, score_pair
 
-ARMS = ("rules", "no_tools", "agent")
-NEEDS_API_KEY = ("no_tools", "agent")
+# Ordered as a ladder: each rung adds one capability to the one before it.
+ARMS = ("rules", "classify", "no_tools", "agent")
+NEEDS_API_KEY = ("classify", "no_tools", "agent")
 
 
 class SupportsBrewReads(Protocol):
@@ -56,6 +57,11 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
     client = anthropic.Anthropic(api_key=config.api_key)
     print(f"model: {config.model} (effort={config.effort or 'default'})")
 
+    if "classify" in names:
+        classifier = ClassifyBaseline(client, config)
+        runners.append(
+            Runner("classify", lambda p: classifier.run(p.before, p.complaint))
+        )
     if "no_tools" in names:
         baseline = NoToolsBaseline(client, config)
         runners.append(
