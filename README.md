@@ -302,6 +302,21 @@ it went unnoticed for a whole run; what it cost was the trace's standing as an
 account of the answer. The per-arm count of misquotes is printed after the
 tables, so a recurrence is visible without grepping.
 
+It was not a one-off: 53 of 100 pairs on Sonnet 5, and 67 of the same 100 on
+Haiku 4.5. Since the flag says *whether* and never *why* — and a check stricter
+than the field deserves looks exactly like a model that invents quotes — the
+quotes can be bucketed against the notes they came from:
+
+```bash
+.venv/bin/python -m brew_agent.eval.audit_evidence traces/<run_id> [traces/<other>]
+```
+
+Dropped punctuation means the check is too strict; spans stitched from separate
+sentences mean the field should ask for one contiguous quote; a paraphrase means
+the model is summarising and the expectation is wrong. Each wants a different
+fix, so the buckets are the point. Offline, over traces already on disk, and it
+takes several runs at once to compare models over the same pairs.
+
 ## Tests
 
 ```bash
