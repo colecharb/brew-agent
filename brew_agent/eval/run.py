@@ -14,10 +14,10 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from ..baselines import ArmResult, NoToolsBaseline, run_rules
-from ..config import OUTPUT_DIR, TRACE_DIR, ConfigError, ModelConfig
+from ..config import LABEL_CACHE, OUTPUT_DIR, TRACE_DIR, ConfigError, ModelConfig
 from ..models import HoldoutPair
 from ..tools import Toolbox
 from .pairs import EXCLUDE, RAW, REDACT, PairStats, build_pairs, stratified_sample
@@ -76,13 +76,14 @@ def run_eval(
     names: list[str],
     n: int,
     leak_mode: str = REDACT,
+    labels: Mapping[str, Any] | None = None,
     trace_root: Path | None = None,
     output_root: Path | None = None,
 ) -> dict:
     """Fetch, pair, sample, run every arm, score, and write the artefacts."""
     runners = build_runners(names, db)
     brews = db.fetch_all_brews()
-    pairs, stats = build_pairs(brews, leak_mode=leak_mode)
+    pairs, stats = build_pairs(brews, leak_mode=leak_mode, labels=labels)
     sample = stratified_sample(pairs, n, stats)
     if not sample:
         raise RuntimeError("no eligible holdout pairs found")
@@ -230,6 +231,18 @@ def _write_trace(
     )
 
 
+def _label_notes(db: SupportsBrewReads) -> Mapping[str, Any]:
+    """Run (or reuse) the cached model labelling pass over every note."""
+    import anthropic
+
+    from .labels import label_brews
+
+    config = ModelConfig.from_env()
+    client = anthropic.Anthropic(api_key=config.api_key)
+    print(f"labelling notes with {config.model} (cached in {LABEL_CACHE})")
+    return label_brews(client, config, db.fetch_all_brews(), LABEL_CACHE)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, default=24, help="pairs to sample")
@@ -263,6 +276,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.set_defaults(leak_mode=REDACT)
+    parser.add_argument(
+        "--label",
+        action="store_true",
+        help=(
+            "run the model labelling pass over the notes before pairing, "
+            "catching stated adjustments the regex misses and marking which "
+            "notes contain a taste complaint at all. Cached to labels/, so it "
+            "costs nothing on a rerun."
+        ),
+    )
     args = parser.parse_args(argv)
 
     seen: list[str] = []
@@ -278,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         db = BrewDatabase.connect()
         print(f"signed in as {db.user_id}")
-        result = run_eval(db, seen, args.n, leak_mode=args.leak_mode)
+        labels = _label_notes(db) if args.label else None
+        result = run_eval(db, seen, args.n, leak_mode=args.leak_mode, labels=labels)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

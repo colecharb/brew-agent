@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 TRACE_DIR = PACKAGE_ROOT / "traces"
 OUTPUT_DIR = PACKAGE_ROOT / "evals" / "output"
+LABEL_CACHE = PACKAGE_ROOT / "labels" / "notes.json"
 
 # Claude Opus 5 thinks by default and `max_tokens` caps thinking plus response
 # text together, so leave real headroom here.

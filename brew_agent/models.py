@@ -273,6 +273,9 @@ class HoldoutPair:
     leak_phrase: str | None = None
     complaint: str = ""
     redacted: list[str] = field(default_factory=list)
+    # Whether the note describes a taste problem at all, per the model labeller.
+    # None when the labelling pass hasn't been run.
+    diagnosable: bool | None = None
     tags: list[str] = field(default_factory=list)
 
     @property

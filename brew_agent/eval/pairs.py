@@ -30,8 +30,10 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from typing import Mapping, Sequence
 
 from ..models import Brew, HoldoutPair
+from .labels import NoteLabel, quote_spans
 
 # A note leaks when it names a PARAMETER CHANGE. Naming a taste outcome does
 # not: "just want a touch more body" is legitimate diagnosable input, while
@@ -92,7 +94,19 @@ LEAK_MODES = (REDACT, EXCLUDE, RAW)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
 
 
-def redact_leaks(notes: str) -> tuple[str, list[str]]:
+def _sentence_spans(notes: str) -> list[tuple[int, int]]:
+    """Offsets of each non-empty sentence, so labelled spans can be located."""
+    spans, start = [], 0
+    for boundary in _SENTENCE_SPLIT.finditer(notes):
+        spans.append((start, boundary.start()))
+        start = boundary.end()
+    spans.append((start, len(notes)))
+    return [(s, e) for s, e in spans if notes[s:e].strip()]
+
+
+def redact_leaks(
+    notes: str, extra_spans: Sequence[tuple[int, int]] = ()
+) -> tuple[str, list[str]]:
     """Remove whole sentences that state an adjustment.
 
     By sentence rather than by span: cutting mid-sentence leaves a fragment that
@@ -104,12 +118,17 @@ def redact_leaks(notes: str) -> tuple[str, list[str]]:
 
         "Body and zing both! My guess is that maybe 5-10 um coarser could open
         this brew up"  ->  "Body and zing both!"
+
+    `extra_spans` are offsets the model labeller flagged (see `eval/labels.py`).
+    A sentence overlapping one is cut just as a regex match would be, so the two
+    detectors compose rather than competing.
     """
     kept, removed = [], []
-    for sentence in _SENTENCE_SPLIT.split(notes):
-        if not sentence.strip():
-            continue
-        (removed if LEAK_PATTERN.search(sentence) else kept).append(sentence.strip())
+    for start, end in _sentence_spans(notes):
+        sentence = notes[start:end]
+        labelled = any(qe > start and qs < end for qs, qe in extra_spans)
+        leaks = labelled or LEAK_PATTERN.search(sentence)
+        (removed if leaks else kept).append(sentence.strip())
     return " ".join(kept), removed
 
 
@@ -136,7 +155,10 @@ class PairStats:
     within_scale: int = 0
     something_changed: int = 0
     leak_mode: str = REDACT
+    labelled: bool = False
     leaky_detected: int = 0
+    leaky_regex_only: int = 0
+    leaky_labeller_added: int = 0
     leaky_excluded: int = 0
     redacted_to_nothing: int = 0
     eligible: int = 0
@@ -163,6 +185,12 @@ class PairStats:
             (f"+ no unit change (>{MAX_GRIND_RATIO:g}x jump)", self.within_scale),
             ("+ something actually changed", self.something_changed),
             ("  of which state an adjustment", self.leaky_detected),
+        ]
+        if self.labelled:
+            # The residual the regex was missing. Near zero means the regex is
+            # doing the job; large means it needs another pass.
+            steps.append(("    found only by the labeller", self.leaky_labeller_added))
+        steps += [
             leak_step,
             ("= eligible pairs", self.eligible),
             (f"sampled across {self.users_sampled} users", self.sampled),
@@ -190,11 +218,17 @@ def _scale_jump(before: Brew, after: Brew) -> bool:
 def build_pairs(
     brews: list[Brew],
     leak_mode: str = REDACT,
+    labels: Mapping[str, "NoteLabel"] | None = None,
 ) -> tuple[list[HoldoutPair], PairStats]:
-    """Apply the filter chain and return the eligible pairs plus the funnel."""
+    """Apply the filter chain and return the eligible pairs plus the funnel.
+
+    `labels` is the optional model labelling pass from `eval/labels.py`. Omitted,
+    detection is regex-only and results are exactly as they were before the
+    labeller existed — every existing count still holds.
+    """
     if leak_mode not in LEAK_MODES:
         raise ValueError(f"leak_mode must be one of {LEAK_MODES}, got {leak_mode!r}")
-    stats = PairStats(total_brews=len(brews), leak_mode=leak_mode)
+    stats = PairStats(total_brews=len(brews), leak_mode=leak_mode, labelled=bool(labels))
 
     usable = [b for b in brews if b.created_by and b.coffee_id]
     usable.sort(key=lambda b: (b.brew_timestamp, b.id))
@@ -238,22 +272,32 @@ def build_pairs(
     pairs = []
     for before, after in candidates:
         match = LEAK_PATTERN.search(before.notes)
+        label = (labels or {}).get(before.id)
+        spans = quote_spans(before.notes, label) if label else []
+        # Either detector is enough. The labeller catches paraphrase the regex
+        # misses; the regex catches quotes the labeller failed to locate.
+        leaky = bool(match) or bool(label and label.states_adjustment)
+
         if leak_mode == RAW:
             complaint, removed = before.notes, []
         else:
-            complaint, removed = redact_leaks(before.notes)
+            complaint, removed = redact_leaks(before.notes, spans)
+
         pairs.append(
             HoldoutPair(
                 before=before,
                 after=after,
-                leaky=match is not None,
+                leaky=leaky,
                 leak_phrase=match.group(0) if match else None,
                 complaint=complaint,
                 redacted=removed,
+                diagnosable=label.has_complaint if label else None,
             )
         )
 
     stats.leaky_detected = sum(1 for p in pairs if p.leaky)
+    stats.leaky_regex_only = sum(1 for p in pairs if LEAK_PATTERN.search(p.before.notes))
+    stats.leaky_labeller_added = stats.leaky_detected - stats.leaky_regex_only
     if leak_mode == EXCLUDE:
         pairs = [p for p in pairs if not p.leaky]
         stats.leaky_excluded = stats.leaky_detected

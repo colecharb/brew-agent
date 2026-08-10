@@ -195,7 +195,7 @@ class NoToolsBaseline:
                 system=NO_TOOLS_SYSTEM,
                 messages=messages,
                 tools=[SUBMIT_RECOMMENDATION],
-                force_submit=True,
+                force_tool=SUBMIT_TOOL,
             )
         except Exception as exc:
             return ArmResult(
@@ -226,7 +226,7 @@ def call_model(
     system: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-    force_submit: bool = False,
+    force_tool: str | None = None,
 ) -> Any:
     """One Messages call.
 
@@ -243,16 +243,16 @@ def call_model(
     }
     if config.effort:
         kwargs["output_config"] = {"effort": config.effort}
-    if force_submit:
-        kwargs["tool_choice"] = {"type": "tool", "name": SUBMIT_TOOL}
+    if force_tool:
+        kwargs["tool_choice"] = {"type": "tool", "name": force_tool}
 
     try:
         return client.messages.create(**kwargs)
     except anthropic.BadRequestError as exc:
         # Forcing a specific tool is not accepted in every model/thinking
         # combination. Losing the forcing is survivable — the prompt already
-        # asks for the tool — so retry once rather than failing the pair.
-        if force_submit and "tool_choice" in str(exc).lower():
+        # asks for the tool — so retry once rather than failing the call.
+        if force_tool and "tool_choice" in str(exc).lower():
             kwargs.pop("tool_choice")
             return client.messages.create(**kwargs)
         raise

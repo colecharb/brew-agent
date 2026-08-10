@@ -179,7 +179,7 @@ class BrewAgent:
                 system=SYSTEM_PROMPT,
                 messages=messages,
                 tools=[SUBMIT_RECOMMENDATION],
-                force_submit=True,
+                force_tool=SUBMIT_TOOL,
             )
         except Exception as exc:
             return Recommendation(error=f"{type(exc).__name__}: {exc}")
