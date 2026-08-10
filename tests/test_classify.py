@@ -96,8 +96,8 @@ def brew(grind="500", temp=93.0):
     )
 
 
-def classify(verdict, note="tasted a bit off", **kw):
-    client = FakeClient(verdict_response(verdict))
+def classify(verdict, note="tasted a bit off", evidence="the words", **kw):
+    client = FakeClient(verdict_response(verdict, evidence))
     result = ClassifyBaseline(client, CONFIG).run(brew(**kw), note)
     return client, result
 
@@ -237,6 +237,56 @@ class TestDegradation:
         _, result = classify(UNDER, temp=None)
         assert result.recommendation.water_temp is None
         assert result.recommendation.grind_value is not None
+
+
+class TestEvidenceIsCheckedAgainstTheNote:
+    """A trace that misquotes the note cannot explain the score it sits next to.
+
+    One live call returned `"</antml\\u0903parameter>"` in this field — a
+    malformed fragment where a quote belonged. Nothing downstream reads
+    `evidence`, so it cost no accuracy. It cost the trace its standing as
+    evidence, which is the only reason the field exists.
+    """
+
+    def test_a_real_quote_passes(self):
+        _, result = classify(OVER, note="Bitter and drying.", evidence="drying")
+        assert result.trace["evidence_verbatim"] is True
+
+    def test_case_and_reflowed_whitespace_are_not_fabrication(self):
+        note = "Harsh finish,\n  really quite drying."
+        _, result = classify(OVER, note=note, evidence="Harsh finish, really")
+        assert result.trace["evidence_verbatim"] is True
+
+    def test_a_fragment_of_nothing_is_flagged(self):
+        _, result = classify(
+            OVER, note="Bitter and drying.", evidence="</antmlःparameter>\n"
+        )
+        assert result.trace["evidence_verbatim"] is False
+
+    def test_a_paraphrase_is_flagged(self):
+        """Not a fabrication, but not a quote either, and the field asks for one."""
+        _, result = classify(
+            UNDER, note="Didn't really sing.", evidence="lacked sweetness"
+        )
+        assert result.trace["evidence_verbatim"] is False
+
+    def test_empty_evidence_is_left_alone(self):
+        """`neither` is documented as having none, so absence is not a fault."""
+        _, result = classify(NEITHER, note="Yes.", evidence="")
+        assert result.trace["evidence_verbatim"] is True
+
+    def test_junk_evidence_still_scores_off_the_verdict(self):
+        """The check observes; it must not become a second gate on the answer.
+
+        Only `verdict` reaches `_apply_step`, so a corrupted quote costs the
+        arm nothing numerically — which is exactly why it went unnoticed. The
+        reasoning string does differ, since it quotes what it was given.
+        """
+        clean = classify(UNDER, note="Sour.", evidence="Sour")[1].recommendation
+        junk = classify(UNDER, note="Sour.", evidence="ःः")[1].recommendation
+        for field in ("grind_setting", "water_temp", "primary_lever"):
+            assert junk.to_dict()[field] == clean.to_dict()[field], field
+        assert junk.error is None
 
 
 def test_trace_records_the_verdict_and_evidence():

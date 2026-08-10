@@ -181,6 +181,26 @@ class TestDiagnosableSubset:
         assert "note describes a taste problem" in out
 
 
+class TestMisquotedEvidenceIsReported:
+    """Counted per run, so "was that a one-off?" stops needing a trace grep."""
+
+    def test_silent_when_no_arm_quotes_the_note(self, result, capsys):
+        # `rules` has no evidence field at all, so there is nothing to warn about.
+        assert result["evidence_not_verbatim"] == {}
+        print_report(result)
+        assert "quoted evidence absent" not in capsys.readouterr().out
+
+    def test_it_reaches_the_results_file(self, result):
+        written = json.loads(result["output_path"].read_text())
+        assert written["evidence_not_verbatim"] == {}
+
+    def test_reported_when_an_arm_misquotes(self, result, capsys):
+        print_report({**result, "evidence_not_verbatim": {"classify": 3}})
+        out = capsys.readouterr().out
+        assert "classify quoted evidence absent from the note on 3 pair(s)" in out
+        assert "Scores are unaffected" in out
+
+
 def test_unknown_arm_is_rejected_before_connecting():
     """Fails on the argument, not on a missing database connection."""
     with pytest.raises(SystemExit) as exc:

@@ -320,6 +320,9 @@ class ClassifyBaseline:
                 "model": self._config.model,
                 "verdict": verdict,
                 "evidence": evidence,
+                # False means the model returned something that is not in the
+                # note. Scores are unaffected; the trace's account of why is.
+                "evidence_verbatim": evidence_is_verbatim(evidence, complaint),
                 "stop_reason": response.stop_reason,
                 "usage": usage_of(response),
                 "latency_ms": round((time.monotonic() - started) * 1000),
@@ -335,6 +338,27 @@ def _read_verdict(response: Any) -> tuple[str | None, str]:
         if block.type == "tool_use" and block.name == CLASSIFY_TOOL:
             return block.input.get("verdict"), block.input.get("evidence") or ""
     return None, ""
+
+
+def evidence_is_verbatim(evidence: str, note: str) -> bool:
+    """Is the quoted evidence actually a span of the note?
+
+    One classify call came back with `"</antml\\u0903parameter>"` in this field:
+    a malformed token fragment where a quote should have been. It changes no
+    score — only `verdict` reaches `_apply_step` — but it means the trace
+    misrepresents the reasoning, and a trace that cannot be trusted about the
+    small things is not evidence about the large ones.
+
+    Whitespace is normalised before comparing, since a model reflowing a quote
+    across lines is a formatting difference rather than a fabrication. Anything
+    else that is not in the note is reported as not verbatim, whether it is a
+    paraphrase or a fragment of nothing at all.
+    """
+    needle = " ".join(evidence.split()).lower()
+    if not needle:
+        # Legitimately empty for `neither`, and nothing to check either way.
+        return True
+    return needle in " ".join(note.split()).lower()
 
 
 # --- arm 3: one model call, no data ---------------------------------------

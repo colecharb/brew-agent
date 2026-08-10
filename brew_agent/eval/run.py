@@ -101,12 +101,17 @@ def run_eval(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     per_arm: dict[str, list[PairScore]] = {r.name: [] for r in runners}
+    # Arms that quote the note back are checked against it. Nothing here changes
+    # a score — it is the trace's honesty that is being counted.
+    odd_evidence: dict[str, int] = {}
     for index, pair in enumerate(sample, start=1):
         print(f"[{index}/{len(sample)}] {pair.id}", end="", flush=True)
         for runner in runners:
             result = runner.run(pair)
             score = score_pair(pair, result.recommendation)
             per_arm[runner.name].append(score)
+            if result.trace.get("evidence_verbatim") is False:
+                odd_evidence[runner.name] = odd_evidence.get(runner.name, 0) + 1
             _write_trace(trace_dir, runner.name, pair, result, score)
             print(f"  {runner.name}={score.grind}", end="", flush=True)
         print()
@@ -133,6 +138,7 @@ def run_eval(
                 "arms_diagnosable_only": {
                     name: arm.to_dict() for name, arm in diagnosable.items()
                 },
+                "evidence_not_verbatim": odd_evidence,
                 "pairs": [
                     {"pair_id": p.id, "user_id": p.user_id, "leaky": p.leaky}
                     for p in sample
@@ -147,6 +153,7 @@ def run_eval(
         "stats": stats,
         "scores": scores,
         "diagnosable": diagnosable,
+        "evidence_not_verbatim": odd_evidence,
         "output_path": out_path,
         "trace_dir": trace_dir,
     }
@@ -214,6 +221,14 @@ def print_report(result: dict) -> None:
     )
     print("                     change raised the rating. This is the headline number.")
     print("held                 recommended no change to anything.")
+
+    for name, count in (result.get("evidence_not_verbatim") or {}).items():
+        print(
+            f"\nwarning: {name} quoted evidence absent from the note on "
+            f"{count} pair(s). Scores are unaffected — the verdict is what gets "
+            f"used — but those traces do not explain themselves."
+        )
+
     print(f"\nrun {result['run_id']}")
     print(f"  results {result['output_path']}")
     print(f"  traces  {result['trace_dir']}")
