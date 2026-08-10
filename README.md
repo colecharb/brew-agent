@@ -182,8 +182,35 @@ termination signal.
 
 `user_id` is optional. It is a relevance control, not a security boundary — see
 below. Every returned row carries `created_by` and the gear names so the model
-can see when it is looking at somebody else's dial, and traces record whether
-each call was scoped or global.
+can see when it is looking at somebody else's dial, and traces record whether a
+`user_id` was given.
+
+### The time cutoff
+
+Every tool is bounded to brews made **strictly before** the one being diagnosed.
+The cutoff is `brew.brew_timestamp`, taken from the brew itself so it cannot
+drift out of sync with the question, and it is not a tool parameter — the model
+cannot widen it.
+
+This is not a detail. On the first live run, without it,
+`get_user_brews_with_bean` returned the held-out next brew, and the agent said
+so in its own reasoning:
+
+> *"The next attempt at 4.1 with hotter water actually got worse"*
+
+It read what the user did next and extrapolated one step further. Scored
+"correct", meant nothing. In production the cutoff is invisible — the brew being
+diagnosed is always the newest — but in the eval the answer is sitting in the
+same table two rows down.
+
+Guarded at three levels: `Toolbox.dispatch` takes `as_of` as a **required**
+argument with no default, so omitting it raises rather than leaks;
+`tests/test_db.py` asserts the queries carry `.lt("brew_timestamp", …)` into
+PostgREST; and `tests/test_agent.py` runs the agent against a database
+containing a known future brew and asserts no tool ever returns it.
+
+An empty history result therefore means "no earlier brews", not "lookup failed",
+and the tool descriptions say so.
 
 The loop has a hard cap (`BREW_AGENT_MAX_ITERATIONS`, default 6). On hitting it,
 one more call is made with `tool_choice` pinned to `submit_recommendation`, so a
