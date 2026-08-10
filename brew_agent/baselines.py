@@ -163,6 +163,14 @@ def _apply_step(
         direction = -1 if finer else 1
         target = current * (1 + direction * GRIND_STEP)
         decimals = len(brew.grind_setting.split(".")[1]) if "." in (brew.grind_setting or "") else 0
+        if round(target, decimals) == round(current, decimals):
+            # A percentage step vanishes on a coarse dial: 5% of 7 is 0.35, and
+            # a whole-number grinder rounds that straight back to 7. The arm
+            # then reports a confident recommendation that proposes the setting
+            # already in use, which scores as an abstention and is
+            # indistinguishable from having had no opinion. Move by the
+            # smallest amount the dial can actually express instead.
+            target = current + direction * 10.0**-decimals
         rec.grind_setting = f"{round(target, decimals):.{decimals}f}"
     else:
         rec.primary_lever = "none"

@@ -233,6 +233,33 @@ class TestDegradation:
         assert result.recommendation.grind_setting is None
         assert result.recommendation.primary_lever == "none"
 
+    def test_a_coarse_dial_still_gets_a_real_move(self):
+        """5% of 7 is 0.35, which a whole-number dial rounds back to 7.
+
+        The arm would report `grind_setting: "7"` on a brew already at 7 — a
+        confident recommendation that proposes nothing, scored as an abstention
+        and indistinguishable from having had no opinion.
+        """
+        _, finer = classify(UNDER, grind="7")
+        _, coarser = classify(OVER, grind="7")
+        assert finer.recommendation.grind_setting == "6"
+        assert coarser.recommendation.grind_setting == "8"
+
+    def test_a_decimal_dial_expresses_5_percent_and_keeps_it(self):
+        """7.0 has room for 6.65, so the floor must not fire here."""
+        _, result = classify(UNDER, grind="7.0")
+        assert result.recommendation.grind_setting == "6.6"
+
+    def test_the_floor_respects_the_dial_s_own_precision(self):
+        """5% of 0.5 is 0.025 — still too small for a one-decimal dial."""
+        _, result = classify(UNDER, grind="0.5")
+        assert result.recommendation.grind_setting == "0.4"
+
+    def test_a_fine_dial_is_untouched_by_the_floor(self):
+        """Where 5% is expressible, it is still exactly 5%."""
+        _, result = classify(UNDER, grind="500")
+        assert result.recommendation.grind_setting == "475"
+
     def test_missing_temperature_yields_no_temperature_advice(self):
         _, result = classify(UNDER, temp=None)
         assert result.recommendation.water_temp is None
