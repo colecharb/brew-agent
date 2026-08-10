@@ -238,8 +238,9 @@ CLASSIFY_TASTE: dict[str, Any] = {
             "evidence": nullable(
                 "string",
                 "The words from the note that decided it, copied verbatim "
-                "rather than paraphrased. Null when the verdict is neither or "
-                "both and there is nothing in the note to quote.",
+                "rather than paraphrased. Null only when the note contains "
+                "nothing to point at — in practice, when the verdict is "
+                "neither. A both verdict still has each side to quote.",
             ),
         },
         "required": ["verdict", "evidence"],
