@@ -28,15 +28,21 @@ real account, and an Anthropic API key.
 It prints one row per arm:
 
 ```
+All sampled pairs
 arm           n |   ok  wrong  quiet    dir |     magnitude |   when improved |  held  err
 ------------------------------------------------------------------------------------------
-rules        60 |    9      4     26   23% |     5/9   56% |      4/15   27% |    42    0
+rules        60 |   10      4     25   26% |    6/10   60% |      5/16   31% |    41    0
+
+Pairs whose note describes a taste problem
+arm           n |   ok  wrong  quiet    dir |     magnitude |   when improved |  held  err
+------------------------------------------------------------------------------------------
+rules        15 |    6      3      3   50% |     4/6   67% |       3/6   50% |     2    0
 ```
 
 - **ok / wrong / quiet** — over the pairs where the user moved the grind: moved
   it the same way, moved it the opposite way, or recommended no grind change.
 - **dir** — `ok / (ok + wrong + quiet)`. Staying quiet counts as a miss, so a
-  conservative arm cannot hide. The row above reads: the rule table is right
+  conservative arm cannot hide. The first row reads: the rule table is right
   about two thirds of the time *when it speaks*, but it has nothing to say on
   two thirds of the pairs.
 - **when improved** — the same rate, restricted to pairs where the user's own
@@ -45,7 +51,15 @@ rules        60 |    9      4     26   23% |     5/9   56% |      4/15   27% |  
 - **magnitude** — of the `ok` pairs, how often the size was within 0.5x–2x of
   what the user actually did.
 
-Useful flags: `--arms rules` (no API key needed), `--include-leaky` (see below).
+The second table appears once the labelling pass has run (`--label`). It matters
+more than it looks: most notes are not complaints at all — *"Yes."*, *"For
+Clemi's latte"*, *"Fantastic. So open and sweet."* The user moved the grind for
+reasons never written down, and no arm can be right about those. Scoring them
+drags every arm toward the same middle, which is why the same rule table reads
+26% across all pairs and 50% on the ones where a right answer exists.
+
+Useful flags: `--arms rules` (no API key needed), `--label`, `--exclude-leaky`,
+`--include-leaky` (all below).
 
 ## How it's evaluated
 
@@ -54,9 +68,8 @@ of the same coffee by the same user, the later brew is what that user decided to
 change. Hold it out, hand the agent the earlier brew and its tasting notes, and
 compare.
 
-**372 pairs** survive the filter chain over the seed dump; **332** after
-excluding leakage. Each filter is counted and printed, so nothing is dropped
-silently.
+**372 pairs** survive the filter chain over the seed dump; **367** after
+redaction. Each filter is counted and printed, so nothing is dropped silently.
 
 Three decisions that the data forced:
 
@@ -72,32 +85,87 @@ every pair using that grinder rather than failing. So the agent is told the
 current setting and must answer with a number on the same dial; matching signs
 is a hit whichever way that particular grinder counts.
 
-**10.8% of otherwise-usable pairs state the answer in the input.** Users write
-things like *"I'll dial this down to 485 microns next brew"* in the notes that
-become the complaint. Those are excluded by default and counted. `--include-leaky`
-scores them anyway, which is a harness self-test rather than a measurement: any
-arm that reads the notes should approach 100% there, and one that doesn't has a
-bug.
+**28% of otherwise-usable pairs state the answer in the input**, in two
+grammars. The plan: *"I'll dial this down to 485 microns next brew"*, *"clearly
+needs to be a little finer ground"*. And the verdict: *"Sour, drying. Too
+coarse"* — past tense, but the answer just as plainly. A keyword table can read
+neither; a model reads both perfectly. Left in, they would flatter exactly the
+arms under test.
 
 Sampling round-robins across users, because one logger owns roughly three
 quarters of the eligible pairs.
 
-## The arms
+### Why redaction, and not telling the model to ignore it
 
-| arm | model | history |
+The offending sentence is cut before any arm sees the note. The obvious
+alternative — instructing the model to disregard a stated adjustment — was
+rejected for three reasons:
+
+- **It can't be verified.** The phrase is in context either way. "Disregard" is
+  a change in influence, not an observable action, so no artifact in the trace
+  shows whether it worked.
+- **It can't be detected after the fact.** Leaky notes usually also contain real
+  taste evidence pointing the same way, so a contaminated answer and a reasoned
+  one look identical.
+- **It's asymmetric.** `rules` cannot read *"wasn't grinding coarse enough"*
+  under any instruction. Only the model arms would be on the honour system, and
+  they are the ones being measured.
+
+Redaction has none of that: mechanical rather than a request, identical for
+every arm, auditable in the trace, and it **keeps the pair** — 367 rather than
+the 267 exclusion leaves. Cuts are by whole sentence, since a fragment is both
+unreadable and still suggestive. Leak and evidence almost always sit in separate
+sentences:
+
+> *"Body and zing both! My guess is that maybe 5–10 um coarser could open this
+> brew up"* → *"Body and zing both!"*
+
+Three modes, all runnable:
+
+| mode | flag | what it is for |
 |---|---|---|
-| `rules` | none | none |
-| `no_tools` | one call | none |
-| `agent` | tool loop | three tools |
+| redact | default | the measurement |
+| exclude | `--exclude-leaky` | conservative cross-check — a big gap means redaction is leaving hints |
+| raw | `--include-leaky` | harness self-test; any note-reading arm should near-ace it, and the gap against the default measures the contamination directly |
 
-`rules` is keyword matching with one assumption baked in — that a higher grind
-number means coarser. That holds for microns and most dials, but it is exactly
-the guess the agent is meant to avoid by reading the user's own history. Where
-it is wrong, this arm is confidently backwards, which is the point of having it.
+Detection is a regex plus an optional model labelling pass (`--label`), cached
+to `labels/` and gitignored. Either detector is enough to cut a sentence, and a
+label calling a note clean never un-redacts a regex match. A failed labelling
+call fails closed. The funnel prints how many leaks only the labeller found — near
+zero means the regex is doing the job.
 
-Between them the two baselines separate two questions: if `agent` doesn't beat
-`no_tools`, the tools aren't earning their cost; if `no_tools` doesn't beat
-`rules`, the model isn't either.
+## The arms — a ladder, one rung at a time
+
+Each arm adds exactly one capability to the one below it, so the gap between any
+two rungs prices that one thing.
+
+| arm | reads the note | picks the change | reads history |
+|---|---|---|---|
+| `rules` | keyword table | fixed ±5% | — |
+| `classify` | **model** | fixed ±5% | — |
+| `no_tools` | model | **model** | — |
+| `agent` | model | model | **three tools** |
+
+- `rules` → `classify` — the value of language understanding. Same 5% step, same
+  ±2°C, same "higher is coarser" assumption; only the reader changes. A test
+  asserts both arms emit byte-identical numbers for the same verdict, because
+  the moment that diverges the delta stops measuring one variable.
+- `classify` → `no_tools` — the value of letting the model choose the size and
+  the lever, not just the direction.
+- `no_tools` → `agent` — the value of retrieval.
+
+`classify` is deliberately blinkered: its prompt carries the note and nothing
+else — no grind setting, no dose, no gear — and it is offered only
+`classify_taste`, never `submit_recommendation`. That is what stops it quietly
+becoming `no_tools`.
+
+`rules` stays rather than being replaced by `classify`, because it is the only
+rung with no model in it at all. Without it, a gap between keyword matching and
+a full recommender could not be attributed to either cause. It carries one
+assumption worth naming — that a higher grind number means coarser. That holds
+for microns and most dials, but it is exactly the guess the agent is meant to
+avoid by reading the user's own history. Where it is wrong, this arm is
+confidently backwards, which is the point of having it.
 
 ## Tools
 
