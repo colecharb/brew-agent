@@ -8,7 +8,7 @@ import pytest
 from brew_agent.agent import BrewAgent
 from brew_agent.config import ModelConfig
 from brew_agent.models import Brew
-from brew_agent.tools import SUBMIT_TOOL, Toolbox
+from brew_agent.tools import ALL_TOOLS, SUBMIT_TOOL, Toolbox
 
 
 # --- scripted stand-ins ----------------------------------------------------
@@ -58,11 +58,11 @@ class FakeClient:
         self.messages = FakeMessages(script)
 
 
-def a_brew(bid="brew-1", grind="500"):
+def a_brew(bid="brew-1", grind="500", when="2026-01-10T00:00:00+00:00"):
     return Brew(
         id=bid,
         created_by="user-1",
-        brew_timestamp="2026-01-01T00:00:00+00:00",
+        brew_timestamp=when,
         profile_coffee_id="bag-1",
         coffee_id="coffee-1",
         coffee_name="Gesha",
@@ -78,28 +78,46 @@ def a_brew(bid="brew-1", grind="500"):
     )
 
 
+# The brew under diagnosis, one earlier brew, and the held-out later one. The
+# last is the answer; no tool may ever return it.
+DIAGNOSED = a_brew("brew-1", "500", "2026-01-10T00:00:00+00:00")
+EARLIER = a_brew("brew-0", "510", "2026-01-05T00:00:00+00:00")
+FUTURE = a_brew("brew-future", "480", "2026-01-20T00:00:00+00:00")
+
+
 class FakeDatabase:
-    """Stands in for BrewDatabase. `explode` makes a tool raise."""
+    """Stands in for BrewDatabase, and honours `as_of` the way the real one does.
+
+    Honouring it matters: a fake that ignored the cutoff would let the
+    regression test pass while the thing it guards stayed broken.
+    """
 
     def __init__(self, explode: bool = False) -> None:
         self.explode = explode
         self.calls: list[tuple] = []
+        self.brews = [EARLIER, DIAGNOSED, FUTURE]
 
-    def get_brew(self, brew_id):
-        self.calls.append(("get_brew", brew_id))
+    def _before(self, as_of):
+        return [b for b in self.brews if as_of is None or b.brew_timestamp < as_of]
+
+    def get_brew(self, brew_id, as_of=None):
+        self.calls.append(("get_brew", brew_id, as_of))
         if self.explode:
             raise RuntimeError("connection reset")
-        return a_brew(brew_id)
+        found = next((b for b in self.brews if b.id == brew_id), None)
+        if found is None or (as_of and found.brew_timestamp > as_of):
+            return None
+        return found
 
-    def get_user_brews_with_bean(self, coffee_id, user_id=None, limit=20):
-        self.calls.append(("bean", coffee_id, user_id))
-        return [a_brew("brew-2", "495"), a_brew("brew-3", "505")]
+    def get_user_brews_with_bean(self, coffee_id, user_id=None, limit=20, as_of=None):
+        self.calls.append(("bean", coffee_id, user_id, as_of))
+        return self._before(as_of)
 
     def get_user_brews_with_gear(
-        self, grinder_id, brewer_id, min_rating, user_id=None, limit=20
+        self, grinder_id, brewer_id, min_rating, user_id=None, limit=20, as_of=None
     ):
-        self.calls.append(("gear", grinder_id, brewer_id, min_rating, user_id))
-        return [a_brew("brew-4", "490")]
+        self.calls.append(("gear", grinder_id, brewer_id, min_rating, user_id, as_of))
+        return self._before(as_of)
 
 
 SUBMIT_INPUT = {
@@ -158,28 +176,28 @@ def test_trace_records_arguments_scoping_and_returned_rows():
         FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
     ]
     agent, _ = make_agent(script)
-    trace = agent.run(a_brew(), "sour").trace
+    trace = agent.run(DIAGNOSED, "sour").trace
 
     call = trace["iterations"][0]["tool_calls"][0]
     assert call["tool"] == "get_user_brews_with_bean"
     assert call["arguments"]["coffee_id"] == "coffee-1"
-    assert call["scoped_to_user"] is True
-    assert call["row_count"] == 2
+    assert call["user_id_given"] is True
+    assert call["as_of"] == DIAGNOSED.brew_timestamp
+    assert call["row_count"] == 1
     # The actual rows, not just a count — a trace has to be inspectable.
-    assert len(call["returned"]["brews"]) == 2
-    assert call["returned"]["brews"][0]["params"]["grind_setting"] == "495"
+    assert call["returned"]["brews"][0]["params"]["grind_setting"] == "510"
     assert call["latency_ms"] >= 0
 
 
-def test_unscoped_query_is_flagged_in_the_trace():
+def test_trace_flags_when_no_user_was_given():
     """user_id is optional, so traces must show when a call went cross-user."""
     script = [
         FakeResponse([ToolUseBlock("get_user_brews_with_bean", {"coffee_id": "c"})]),
         FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
     ]
     agent, _ = make_agent(script)
-    trace = agent.run(a_brew(), "sour").trace
-    assert trace["iterations"][0]["tool_calls"][0]["scoped_to_user"] is False
+    trace = agent.run(DIAGNOSED, "sour").trace
+    assert trace["iterations"][0]["tool_calls"][0]["user_id_given"] is False
 
 
 def test_hitting_the_cap_still_produces_an_answer():
@@ -278,6 +296,93 @@ def test_sampling_parameters_are_never_sent():
     sent = agent._client.messages.calls[0]
     for banned in ("temperature", "top_p", "top_k"):
         assert banned not in sent
+
+
+class TestNoPeekingAtTheFuture:
+    """The agent must not see brews made after the one it is diagnosing.
+
+    This is the bug the first live run exposed: `get_user_brews_with_bean`
+    returned the held-out next brew, and the agent read off what the user did
+    instead of diagnosing anything. It scored "correct" and meant nothing.
+
+    In production nothing later exists, so the cutoff is invisible there; in the
+    eval the answer is sitting in the same table.
+    """
+
+    def _history_call(self, tool, args):
+        script = [
+            FakeResponse([ToolUseBlock(tool, args)]),
+            FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
+        ]
+        agent, db = make_agent(script)
+        trace = agent.run(DIAGNOSED, "sour").trace
+        return trace["iterations"][0]["tool_calls"][0], db
+
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("get_user_brews_with_bean", {"coffee_id": "coffee-1"}),
+            (
+                "get_user_brews_with_gear",
+                {"grinder_id": "g1", "brewer_id": "b1", "min_rating": 2},
+            ),
+        ],
+    )
+    def test_history_never_returns_a_later_brew(self, tool, args):
+        call, _ = self._history_call(tool, args)
+        returned = {b["brew_id"] for b in call["returned"]["brews"]}
+        assert FUTURE.id not in returned
+        assert returned == {EARLIER.id}
+
+    def test_history_excludes_the_diagnosed_brew_itself(self):
+        """It is not history, and the agent already has it from get_brew."""
+        call, _ = self._history_call(
+            "get_user_brews_with_bean", {"coffee_id": "coffee-1"}
+        )
+        assert DIAGNOSED.id not in {b["brew_id"] for b in call["returned"]["brews"]}
+
+    def test_get_brew_refuses_an_id_from_the_future(self):
+        script = [
+            FakeResponse([ToolUseBlock("get_brew", {"brew_id": FUTURE.id})]),
+            FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
+        ]
+        agent, _ = make_agent(script)
+        call = agent.run(DIAGNOSED, "sour").trace["iterations"][0]["tool_calls"][0]
+        assert "No visible brew" in call["returned"]["error"]
+
+    def test_get_brew_still_returns_the_brew_under_diagnosis(self):
+        """The cutoff is inclusive for the brew itself, or nothing works."""
+        script = [
+            FakeResponse([ToolUseBlock("get_brew", {"brew_id": DIAGNOSED.id})]),
+            FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
+        ]
+        agent, _ = make_agent(script)
+        call = agent.run(DIAGNOSED, "sour").trace["iterations"][0]["tool_calls"][0]
+        assert call["returned"]["brew"]["brew_id"] == DIAGNOSED.id
+
+    def test_the_cutoff_comes_from_the_diagnosed_brew(self):
+        script = [
+            FakeResponse([ToolUseBlock("get_user_brews_with_bean", {"coffee_id": "c"})]),
+            FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)]),
+        ]
+        agent, db = make_agent(script)
+        agent.run(DIAGNOSED, "sour")
+        assert db.calls[0][-1] == DIAGNOSED.brew_timestamp
+
+    def test_the_model_cannot_set_the_cutoff(self):
+        """as_of is not a tool parameter, so a prompt cannot widen it."""
+        for tool in ALL_TOOLS:
+            assert "as_of" not in tool["input_schema"].get("properties", {})
+
+    def test_dispatch_will_not_run_without_a_cutoff(self):
+        """No default — omitting it must fail loudly, not silently leak."""
+        with pytest.raises(TypeError):
+            Toolbox(FakeDatabase()).dispatch("get_brew", {"brew_id": "brew-1"})
+
+    def test_the_trace_records_the_horizon(self):
+        script = [FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)])]
+        agent, _ = make_agent(script)
+        assert agent.run(DIAGNOSED, "sour").trace["as_of"] == DIAGNOSED.brew_timestamp
 
 
 @pytest.mark.parametrize("lever", ["grind_setting", "none", "bogus_lever"])

@@ -58,6 +58,9 @@ class BrewAgent:
             "model": self._config.model,
             "effort": self._config.effort,
             "brew_id": brew.id,
+            # Every tool call is bounded to brews strictly before this. Recorded
+            # so a trace shows the horizon the agent was working under.
+            "as_of": brew.brew_timestamp,
             "complaint": complaint,
             "iterations": [],
             "hit_cap": False,
@@ -118,7 +121,7 @@ class BrewAgent:
 
             messages.append({"role": "assistant", "content": response.content})
             messages.append(
-                {"role": "user", "content": self._run_tools(calls, step)}
+                {"role": "user", "content": self._run_tools(calls, step, brew)}
             )
 
         if recommendation is None:
@@ -143,11 +146,20 @@ class BrewAgent:
             f"What should change on the next brew?"
         )
 
-    def _run_tools(self, calls: list[Any], step: dict[str, Any]) -> list[dict]:
-        """Execute every tool the model asked for and build the result blocks."""
+    def _run_tools(
+        self, calls: list[Any], step: dict[str, Any], brew: Brew
+    ) -> list[dict]:
+        """Execute every tool the model asked for and build the result blocks.
+
+        The cutoff is taken from the brew being diagnosed rather than passed in
+        separately, so it cannot drift out of sync with the question being
+        asked. The model has no say in it — it is not a tool parameter.
+        """
         blocks = []
         for call in calls:
-            payload, tool_trace = self._toolbox.dispatch(call.name, dict(call.input))
+            payload, tool_trace = self._toolbox.dispatch(
+                call.name, dict(call.input), as_of=brew.brew_timestamp
+            )
             step["tool_calls"].append(tool_trace)
             blocks.append(
                 {

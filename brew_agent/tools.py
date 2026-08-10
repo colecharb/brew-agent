@@ -51,7 +51,9 @@ DATA_TOOLS: list[dict[str, Any]] = [
             "coffee_id is the catalogue coffee, so this spans every bag of it. "
             "Pass user_id to stay within one person's history; omit it to see "
             "how everyone brews this coffee, but note that other people's grind "
-            "numbers are on their own grinders and do not transfer."
+            "numbers are on their own grinders and do not transfer. Only brews "
+            "made before the one you are diagnosing are returned, so an empty "
+            "result means this is the first — not that the lookup failed."
         ),
         "input_schema": {
             "type": "object",
@@ -82,7 +84,10 @@ DATA_TOOLS: list[dict[str, Any]] = [
             "and time — so a recommendation is anchored to a real baseline "
             "rather than a generic one. Grinder and brewer together matter: the "
             "same grinder reads very differently for espresso and for filter. "
-            "Pass user_id to stay within one person's history."
+            "Pass user_id to stay within one person's history. Only brews made "
+            "before the one you are diagnosing are returned, so an empty result "
+            "means there is no earlier baseline on this setup — say so rather "
+            "than inventing one."
         ),
         "input_schema": {
             "type": "object",
@@ -194,16 +199,25 @@ When you have what you need, call submit_recommendation. Do not answer in prose.
 
 
 class Toolbox:
-    """Dispatches the data tools and records what each call returned."""
+    """Dispatches the data tools and records what each call returned.
+
+    `as_of` is a required argument of `dispatch`, not an option with a default.
+    It is the one thing standing between the agent and the answer it is supposed
+    to be predicting, and a default of `None` would make forgetting it silent.
+    The caller has the brew in hand — the cutoff is `brew.brew_timestamp` — so
+    there is never a reason not to pass it.
+    """
 
     def __init__(self, db: BrewDatabase) -> None:
         self._db = db
 
-    def dispatch(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], dict]:
+    def dispatch(
+        self, name: str, args: dict[str, Any], as_of: str
+    ) -> tuple[dict[str, Any], dict]:
         """Run one tool call. Returns (payload for the model, trace entry)."""
         started = time.monotonic()
         try:
-            payload = self._run(name, args)
+            payload = self._run(name, args, as_of)
             error = None
         except Exception as exc:  # surfaced to the model, not raised
             payload = {"error": f"{type(exc).__name__}: {exc}"}
@@ -213,7 +227,11 @@ class Toolbox:
         trace = {
             "tool": name,
             "arguments": args,
-            "scoped_to_user": bool(args.get("user_id")),
+            # Whether the model narrowed to one user. `get_brew` takes no
+            # user_id at all, so it always reads false — that is the tool's
+            # shape, not a cross-user read.
+            "user_id_given": bool(args.get("user_id")),
+            "as_of": as_of,
             "row_count": len(rows) if isinstance(rows, list) else (0 if error else 1),
             "latency_ms": round((time.monotonic() - started) * 1000),
             "error": error,
@@ -221,9 +239,9 @@ class Toolbox:
         }
         return payload, trace
 
-    def _run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _run(self, name: str, args: dict[str, Any], as_of: str) -> dict[str, Any]:
         if name == "get_brew":
-            brew = self._db.get_brew(args["brew_id"])
+            brew = self._db.get_brew(args["brew_id"], as_of=as_of)
             if brew is None:
                 return {"error": f"No visible brew with id {args['brew_id']}."}
             return {"brew": brew.to_tool_result()}
@@ -233,6 +251,7 @@ class Toolbox:
                 coffee_id=args["coffee_id"],
                 user_id=args.get("user_id"),
                 limit=int(args.get("limit") or 20),
+                as_of=as_of,
             )
             return {"brews": [b.to_tool_result() for b in brews]}
 
@@ -243,6 +262,7 @@ class Toolbox:
                 min_rating=int(args["min_rating"]),
                 user_id=args.get("user_id"),
                 limit=int(args.get("limit") or 20),
+                as_of=as_of,
             )
             return {"brews": [b.to_tool_result() for b in brews]}
 

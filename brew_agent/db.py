@@ -106,17 +106,38 @@ class BrewDatabase:
         return cls(client, session.user.id)
 
     # --- the three tools exposed to the model ------------------------------
+    #
+    # Every one takes `as_of`: the `brew_timestamp` of the brew being diagnosed.
+    # History is everything *strictly before* it. Nothing later can come back.
+    #
+    # This is not an eval-only nicety. Diagnosing a brew means reasoning from
+    # what was known at the time, and in production nothing later exists anyway —
+    # the brew being diagnosed is the newest one. But in the eval the later brews
+    # are sitting right there in the same table, and without the cutoff
+    # `get_user_brews_with_bean` cheerfully returns the held-out answer. It did,
+    # on the first real run: the agent read the next brew, saw it went badly, and
+    # extrapolated past it. Scored "correct" and meant nothing.
 
-    def get_brew(self, brew_id: str) -> Brew | None:
-        """One brew: structured parameters plus the free-text notes and recipe."""
+    def get_brew(self, brew_id: str, as_of: str | None = None) -> Brew | None:
+        """One brew: structured parameters plus the free-text notes and recipe.
+
+        `<=` rather than `<` here, since the brew being diagnosed sits exactly
+        at the cutoff and looking it up is the whole point.
+        """
         rows = self._select().eq("id", brew_id).limit(1).execute().data
-        return Brew.from_api_row(rows[0]) if rows else None
+        if not rows:
+            return None
+        brew = Brew.from_api_row(rows[0])
+        if as_of and brew.brew_timestamp > as_of:
+            return None
+        return brew
 
     def get_user_brews_with_bean(
         self,
         coffee_id: str,
         user_id: str | None = None,
         limit: int = DEFAULT_LIMIT,
+        as_of: str | None = None,
     ) -> list[Brew]:
         """History on the same coffee, most recent first.
 
@@ -130,7 +151,7 @@ class BrewDatabase:
         query = self._select().in_("profile_coffee_id", bag_ids)
         if user_id:
             query = query.eq("created_by", user_id)
-        return self._ordered(query, limit)
+        return self._ordered(query, limit, as_of)
 
     def get_user_brews_with_gear(
         self,
@@ -139,6 +160,7 @@ class BrewDatabase:
         min_rating: int,
         user_id: str | None = None,
         limit: int = DEFAULT_LIMIT,
+        as_of: str | None = None,
     ) -> list[Brew]:
         """Well-rated brews on the same grinder-and-brewer setup.
 
@@ -159,7 +181,7 @@ class BrewDatabase:
         )
         if user_id:
             query = query.eq("created_by", user_id)
-        return self._ordered(query, limit)
+        return self._ordered(query, limit, as_of)
 
     # --- harness-only, never exposed to the model --------------------------
 
@@ -204,7 +226,12 @@ class BrewDatabase:
         return [row["id"] for row in query.execute().data]
 
     @staticmethod
-    def _ordered(query: Any, limit: int) -> list[Brew]:
+    def _ordered(query: Any, limit: int, as_of: str | None = None) -> list[Brew]:
+        # The cutoff goes in the query, not in a post-filter, so `limit` counts
+        # rows the caller may actually see. Post-filtering would silently return
+        # fewer than asked for whenever recent brews were trimmed.
+        if as_of:
+            query = query.lt("brew_timestamp", as_of)
         rows = (
             query.order("brew_timestamp", desc=True)
             .order("id", desc=True)
