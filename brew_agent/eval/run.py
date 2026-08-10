@@ -169,8 +169,9 @@ def _fraction(correct: int, total: int) -> str:
 
 def _print_table(title: str, scores: Mapping[str, ArmScore]) -> None:
     header = (
-        f"{'arm':<10} {'n':>4} | {'ok':>4} {'wrong':>6} {'quiet':>6} {'dir':>6} "
-        f"| {'magnitude':>13} | {'when improved':>15} | {'held':>5} {'err':>4}"
+        f"{'arm':<10} {'n':>4} | {'ok':>4} {'wrong':>6} {'quiet':>6} {'elsew':>6} "
+        f"{'dir':>6} | {'magnitude':>13} | {'when improved':>15} | "
+        f"{'held':>5} {'err':>4}"
     )
     print(f"\n{title}")
     print(header)
@@ -179,6 +180,7 @@ def _print_table(title: str, scores: Mapping[str, ArmScore]) -> None:
         print(
             f"{name:<10} {arm.n:>4} | "
             f"{arm.grind.correct:>4} {arm.grind.wrong:>6} {arm.grind.abstained:>6} "
+            f"{arm.quiet_elsewhere:>6} "
             f"{_pct(arm.grind.accuracy)} | "
             f"{_fraction(arm.magnitude_hits, arm.magnitude_considered):>7} "
             f"{_pct(arm.magnitude_rate)} | "
@@ -210,6 +212,14 @@ def print_report(result: dict) -> None:
         "                     moved it the opposite way, or recommended no "
         "grind change at all."
     )
+    print(
+        "elsew                of those quiet pairs, how many proposed a "
+        "different lever instead"
+    )
+    print(
+        "                     — an opinion about temperature, not an absence "
+        "of one. Still a miss."
+    )
     print("dir                  ok / (ok + wrong + quiet). Staying quiet counts as a miss.")
     print(
         "magnitude            of the 'ok' pairs, how often the size was within "
@@ -221,6 +231,13 @@ def print_report(result: dict) -> None:
     )
     print("                     change raised the rating. This is the headline number.")
     print("held                 recommended no change to anything.")
+
+    # `rules` and `classify` can only ever bet on the grind, so a spread here
+    # that is not all grind_setting/none belongs to an arm that chose its lever.
+    print("\nWhat each arm bet on")
+    for name, arm in scores.items():
+        spread = ", ".join(f"{lever} {n}" for lever, n in sorted(arm.levers.items()))
+        print(f"  {name:<10} {spread}")
 
     for name, count in (result.get("evidence_not_verbatim") or {}).items():
         print(

@@ -18,6 +18,19 @@ expressed on the same dial. The convention never has to be known.
 If the user moved the grind and the agent recommended no grind change, that is a
 miss, not an exemption — it is tracked separately as `abstained` so a
 conservative arm is visible rather than flattered.
+
+## Two different things called abstention
+
+That column conflates two behaviours, and the difference matters once arms are
+free to choose their own lever. `classify` cannot help but move the grind when it
+reaches a verdict — `_apply_step` does it mechanically — so its abstentions are
+always genuine silence. `no_tools` and `agent` may answer "raise the temperature
+instead", which scores as abstaining on grind despite being a confident opinion.
+
+Read as a capability comparison that quietly penalises the arms whose extra
+capability is choosing the lever. The scoring is unchanged — grind direction is
+what the eval measures — but `abstained` is now split, so silence and a
+different opinion are visible as the different things they are.
 """
 
 from __future__ import annotations
@@ -85,7 +98,20 @@ class PairScore:
     temp: str = NOT_APPLICABLE
     rating_improved: bool | None = None
     recommended_nothing: bool = False
+    # What the arm said it was betting on. "none" for arms that proposed
+    # nothing; always "grind_setting" or "none" for `rules` and `classify`,
+    # which have no other lever to reach for.
+    primary_lever: str = "none"
     error: str | None = None
+
+    @property
+    def quiet_elsewhere(self) -> bool:
+        """Abstained on grind, but did propose some other change.
+
+        The distinction the `abstained` count cannot make on its own: this is an
+        arm with an opinion about temperature, not an arm with nothing to say.
+        """
+        return self.grind == ABSTAINED and not self.recommended_nothing
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +126,8 @@ class PairScore:
             "temp": self.temp,
             "rating_improved": self.rating_improved,
             "recommended_nothing": self.recommended_nothing,
+            "primary_lever": self.primary_lever,
+            "quiet_elsewhere": self.quiet_elsewhere,
             "error": self.error,
         }
 
@@ -113,6 +141,7 @@ def score_pair(pair: HoldoutPair, rec: Recommendation) -> PairScore:
         diagnosable=pair.diagnosable,
         rating_improved=pair.rating_improved,
         recommended_nothing=rec.changes_nothing,
+        primary_lever=rec.primary_lever,
         error=rec.error,
     )
 
@@ -204,6 +233,10 @@ class ArmScore:
     magnitude_considered: int = 0
     magnitude_hits: int = 0
     recommended_nothing: int = 0
+    # Of `grind.abstained`, how many proposed a different lever instead. The
+    # remainder is genuine silence.
+    quiet_elsewhere: int = 0
+    levers: dict[str, int] = field(default_factory=dict)
     errors: int = 0
 
     @property
@@ -235,6 +268,8 @@ class ArmScore:
                 "band": list(MAGNITUDE_BAND),
             },
             "recommended_nothing": self.recommended_nothing,
+            "quiet_elsewhere": self.quiet_elsewhere,
+            "levers": dict(sorted(self.levers.items())),
             "errors": self.errors,
         }
 
@@ -254,6 +289,11 @@ def aggregate(arm: str, scores: Iterable[PairScore]) -> ArmScore:
             result.magnitude_hits += int(score.magnitude_hit)
         if score.recommended_nothing:
             result.recommended_nothing += 1
+        if score.quiet_elsewhere:
+            result.quiet_elsewhere += 1
+        result.levers[score.primary_lever] = result.levers.get(
+            score.primary_lever, 0
+        ) + 1
         if score.error:
             result.errors += 1
     return result

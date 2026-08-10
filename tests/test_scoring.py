@@ -124,6 +124,79 @@ class TestRatioAndSecondaryLevers:
         assert score_pair(pair(before, after), Recommendation()).temp == "n/a"
 
 
+class TestSilenceIsSeparatedFromADifferentOpinion:
+    """`abstained` conflates two behaviours, and only some arms can do both.
+
+    `rules` and `classify` reach for the grind or for nothing — `_apply_step`
+    gives them no other lever. `no_tools` and `agent` may answer "raise the
+    temperature instead", which scores as abstaining on grind while being a
+    confident recommendation. Left merged, the `classify` to `no_tools` rung
+    reads as a capability gap when part of it is a scoring artefact.
+    """
+
+    MOVED = (brew("1", 500, 1, temp=93.0), brew("2", 485, 3, temp=93.0))
+
+    def test_a_temperature_bet_is_quiet_on_grind_but_not_silent(self):
+        score = score_pair(
+            pair(*self.MOVED),
+            Recommendation(water_temp=95.0, primary_lever="water_temp"),
+        )
+        assert score.grind == ABSTAINED
+        assert score.quiet_elsewhere is True
+        assert score.recommended_nothing is False
+
+    def test_proposing_nothing_at_all_is_silence(self):
+        score = score_pair(pair(*self.MOVED), Recommendation())
+        assert score.grind == ABSTAINED
+        assert score.quiet_elsewhere is False
+
+    def test_a_grind_answer_is_never_counted_as_quiet_elsewhere(self):
+        score = score_pair(
+            pair(*self.MOVED),
+            Recommendation(grind_setting="490", water_temp=95.0),
+        )
+        assert score.grind == CORRECT
+        assert score.quiet_elsewhere is False
+
+    def test_the_split_does_not_move_the_accuracy(self):
+        """Still a miss. This reports the shape of the miss, not a reprieve."""
+        elsewhere = aggregate(
+            "x",
+            [
+                score_pair(
+                    pair(*self.MOVED),
+                    Recommendation(water_temp=95.0, primary_lever="water_temp"),
+                )
+            ],
+        )
+        silent = aggregate("x", [score_pair(pair(*self.MOVED), Recommendation())])
+        assert elsewhere.grind.accuracy == silent.grind.accuracy == 0.0
+        assert elsewhere.grind.abstained == silent.grind.abstained == 1
+        assert (elsewhere.quiet_elsewhere, silent.quiet_elsewhere) == (1, 0)
+
+    def test_aggregate_records_what_each_arm_bet_on(self):
+        arm = aggregate(
+            "x",
+            [
+                score_pair(
+                    pair(*self.MOVED),
+                    Recommendation(grind_setting="490", primary_lever="grind_setting"),
+                ),
+                score_pair(
+                    pair(*self.MOVED),
+                    Recommendation(water_temp=95.0, primary_lever="water_temp"),
+                ),
+                score_pair(pair(*self.MOVED), Recommendation()),
+            ],
+        )
+        assert arm.levers == {"grind_setting": 1, "water_temp": 1, "none": 1}
+        assert arm.to_dict()["levers"] == {
+            "grind_setting": 1,
+            "none": 1,
+            "water_temp": 1,
+        }
+
+
 class TestAggregate:
     def test_accuracy_counts_abstention_as_a_miss(self):
         scores = [
