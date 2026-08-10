@@ -163,12 +163,13 @@ off.
 Each arm adds exactly one capability to the one below it, so the gap between any
 two rungs prices that one thing.
 
-| arm | reads the note | picks the change | reads history |
-|---|---|---|---|
-| `rules` | keyword table | fixed ±5% | — |
-| `classify` | **model** | fixed ±5% | — |
-| `no_tools` | model | **model** | — |
-| `agent` | model | model | **three tools** |
+| arm | reads the note | picks the change | reads history | reads everyone's |
+|---|---|---|---|---|
+| `rules` | keyword table | fixed ±5% | — | — |
+| `classify` | **model** | fixed ±5% | — | — |
+| `no_tools` | model | **model** | — | — |
+| `agent` | model | model | **three tools** | — |
+| `agent_community` | model | model | three tools | **a fourth** |
 
 - `rules` → `classify` — the value of language understanding. Same 5% step, same
   ±2°C, same "higher is coarser" assumption; only the reader changes. A test
@@ -177,6 +178,40 @@ two rungs prices that one thing.
 - `classify` → `no_tools` — the value of letting the model choose the size and
   the lever, not just the direction.
 - `no_tools` → `agent` — the value of retrieval.
+- `agent` → `agent_community` — the value of everyone else's history. Same loop,
+  same three tools, one more; `agent` is untouched so both arms stay comparable
+  with the runs already recorded.
+
+### The community rung
+
+A grind number is comparable across people exactly when the grinder and brewer
+match — which is why holdout pairs are keyed on that pair. But the tight query
+(this coffee, this setup, somebody else) matches **14 of 100** sampled pairs and
+usually returns a single brew. Widening is the normal path, not a fallback.
+
+So `get_community_brews` returns up to three labelled groups rather than one
+relaxed list, because they answer different questions:
+
+| group | what transfers |
+|---|---|
+| same coffee, same setup | everything, grind number included |
+| same setup, other coffees | the grind *range* this equipment works in |
+| same coffee, other setups | ratio, temperature, days off roast — **not** grind |
+
+That third row is the whole reason for the labels. Transferability is a property
+of the *parameter*, not the setup: 92°C is 92°C on anyone's kettle, while 500 on
+a Z1 means nothing on an EK43. A relaxed result handed over unlabelled is how a
+stranger's grind number gets read off the wrong dial — and `agent`'s current
+wrong-direction rate is 2 in 63, which is what that would spend.
+
+Coverage says which groups will actually carry the run: same coffee on any gear
+reaches **72 of 100** pairs (median 6 rows), same setup on any coffee **21**. So
+the measurable question is whether same-coffee-different-gear data helps, and
+the number to watch is **`wrong`, not `ok`** — community data that helps raises
+correct calls, community data that pollutes raises wrong ones.
+
+The viewer is supplied by the harness like the time cutoff, never by the model,
+so "everyone else" can never quietly grow to include the user.
 
 `classify` is deliberately blinkered: its prompt carries the note and nothing
 else — no grind setting, no dose, no gear — and it is offered only
@@ -227,6 +262,9 @@ termination signal.
    coffee. `coffee_id` is the catalogue product, so it spans every bag.
 3. `get_user_brews_with_gear(grinder_id, brewer_id, min_rating, user_id?)` —
    well-rated brews on the same setup, for a personal baseline.
+
+A fourth, `get_community_brews`, is offered only to `agent_community` — see the
+ladder above.
 
 `user_id` is optional. It is a relevance control, not a security boundary — see
 below. Every returned row carries `created_by` and the gear names so the model
