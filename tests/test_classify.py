@@ -6,6 +6,8 @@ import pytest
 
 from brew_agent.baselines import (
     BOTH,
+    CLASSIFY_SYSTEM,
+    CLASSIFY_TASTE,
     CLASSIFY_TOOL,
     NEITHER,
     OVER,
@@ -156,6 +158,56 @@ class TestPromptIsolation:
         client, _ = classify(UNDER)
         tools = client.messages.calls[0]["tools"]
         assert [t["name"] for t in tools] == [CLASSIFY_TOOL]
+
+
+class TestTheBrief:
+    """Regression pins for the abstention bug.
+
+    `classify` first scored below the keyword table it exists to beat. Its
+    brief said "judge only what the note says about flavour" and spent two more
+    sentences framing abstention as virtuous, so the arm returned `neither` on a
+    note opening *"Shot pulled way too fast"* — an unambiguous under-extraction
+    call that happens to contain no flavour word at all. The rung was measuring
+    the brief rather than the reader.
+
+    Asserting on prompt text is ordinarily a poor test. Here it is the only
+    artefact available offline, and the specific wording is what broke, so these
+    pin the wording.
+    """
+
+    def test_the_brief_admits_evidence_beyond_taste(self):
+        brief = CLASSIFY_SYSTEM.lower()
+        assert "how the brew ran" in brief
+        assert "too fast" in brief and "ran slow" in brief
+
+    def test_the_schema_admits_evidence_beyond_taste(self):
+        verdict = CLASSIFY_TASTE["input_schema"]["properties"]["verdict"]
+        assert "ran fast" in verdict["description"].lower()
+        assert "ran slow" in verdict["description"].lower()
+
+    def test_judgement_is_not_restricted_to_flavour(self):
+        assert "only what the note says about flavour" not in CLASSIFY_SYSTEM.lower()
+
+    def test_both_ways_out_are_scoped_narrowly(self):
+        """`both` and `neither` both recommend nothing.
+
+        They are between them the arm's only way to lose without being wrong, so
+        widening either one is how this regresses.
+        """
+        brief = CLASSIFY_SYSTEM.lower()
+        assert "reserve neither" in brief
+        assert "reserve both" in brief
+
+    def test_the_scoring_is_never_disclosed_to_the_classifier(self):
+        """Told that silence is penalised, it would guess to protect a number.
+
+        The prompt describes the task. The metric stays outside it — otherwise
+        the arm optimises the eval instead of reading the note, and the rung
+        measures nothing.
+        """
+        brief = CLASSIFY_SYSTEM.lower()
+        for tell in ("miss", "penal", "score", "accuracy", "counts against"):
+            assert tell not in brief, tell
 
 
 class TestDegradation:

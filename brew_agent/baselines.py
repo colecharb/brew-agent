@@ -200,20 +200,19 @@ CLASSIFY_TASTE: dict[str, Any] = {
                 "type": "string",
                 "enum": [UNDER, OVER, BOTH, NEITHER],
                 "description": (
-                    "under_extracted when the note describes sourness, "
-                    "thinness, weakness, a lack of sweetness or body, or a "
-                    "hollow, salty or grassy character. over_extracted when it "
-                    "describes bitterness, harshness, astringency, drying or "
-                    "ashy flavours, or a muddy, heavy cup. both when it "
-                    "genuinely describes each. neither when the note is "
-                    "positive, or says nothing about how the coffee tasted."
+                    "under_extracted when the cup was sour, sharp, thin, weak, "
+                    "hollow, salty or grassy, was short on sweetness or body, "
+                    "or ran fast. over_extracted when it was bitter, harsh, "
+                    "astringent, drying, ashy or muddy, or ran slow. both when "
+                    "the note genuinely describes each. neither only when the "
+                    "note gives no evidence either way."
                 ),
             },
             "evidence": {
                 "type": "string",
                 "description": (
-                    "The words in the note that decided it, quoted. Empty for "
-                    "neither."
+                    "The words from the note that decided it, copied verbatim "
+                    "rather than paraphrased. Empty for neither."
                 ),
             },
         },
@@ -222,17 +221,30 @@ CLASSIFY_TASTE: dict[str, Any] = {
     },
 }
 
-CLASSIFY_SYSTEM = """You read a coffee tasting note and say whether it describes \
-an under-extracted or an over-extracted cup.
+CLASSIFY_SYSTEM = """You read a coffee tasting note and say whether the cup was \
+under-extracted or over-extracted.
 
-Under-extraction tastes sour, thin, weak, hollow, salty, or grassy — the cup is \
-missing sweetness and body. Over-extraction tastes bitter, harsh, astringent, \
-drying, or ashy — too much has been pulled out.
+Under-extraction means not enough came out of the grounds. The cup tastes sour, \
+sharp, thin, weak, hollow, salty or grassy, and is short on sweetness and body. \
+It shows up just as often in how the brew ran: water through too fast, a shot \
+finishing early, a drawdown over sooner than it should have been.
 
-Judge only what the note says about flavour. Plenty of notes are positive, or \
-are not about taste at all ("for the morning latte"); those are neither, and \
-saying so is the right answer rather than a failure. Do not guess at a verdict \
-the words don't support.
+Over-extraction means too much came out. The cup tastes bitter, harsh, \
+astringent, drying, ashy or muddy, and can feel heavy and scoured at once. It \
+shows up in a brew that ran slow: a choked or stalled shot, a drawdown that \
+dragged.
+
+Notes seldom use any of those words. Read for what the drinker meant, not for \
+vocabulary. "Wants more sweetness", "a bit sharp", "didn't really sing" and \
+"watery" are all describing the same under-extracted cup; "harsh finish", \
+"drying", "a bit much" and "grippy" are all describing the same over-extracted \
+one. How the brew ran is evidence exactly as much as how it tasted.
+
+Reserve neither for notes that give you nothing to work with: purely positive, \
+contentless ("Yes."), or about the occasion rather than the cup ("for the \
+morning latte"). Indirect or partial evidence is still evidence — call what it \
+points to. Reserve both for notes that genuinely describe each, not for ones you \
+find hard to call.
 
 Call classify_taste. Do not answer in prose."""
 
@@ -248,6 +260,22 @@ class ClassifyBaseline:
     the same 5% step, the same 2C, and the same "higher number is coarser"
     assumption. Every downstream variable is held constant, so the gap against
     `rules` is language understanding and nothing else.
+
+    On abstention. `both` and `neither` both recommend nothing, and scoring
+    counts silence as a miss, so between them they are the arm's only way to
+    lose without being wrong. The first prompt here spent two sentences
+    encouraging exactly that — "judge only what the note says about flavour",
+    "saying so is the right answer rather than a failure" — and the arm duly
+    returned `neither` on a note opening *"Shot pulled way too fast"*, which is
+    an unambiguous under-extraction call that happens not to be a flavour word.
+    The rung was measuring the brief, not the reader.
+
+    So the brief now admits evidence about how the brew ran, says the textbook
+    vocabulary will usually be absent, and scopes both escape hatches narrowly.
+    What it deliberately does not do is mention the scoring: told that silence
+    is penalised, the model would guess to protect a number rather than read a
+    note, and the arm would stop measuring anything. The prompt describes the
+    task; the metric stays the metric.
     """
 
     def __init__(self, client: anthropic.Anthropic, config: ModelConfig) -> None:
