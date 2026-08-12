@@ -3,14 +3,21 @@
 Internal experiment. Does an LLM with three read-only tools recover the brewing
 adjustments Dial's users actually made, better than a static rule table does?
 
-Not part of the app. No UI, no app integration, never writes to the database.
-`internal/` is excluded from Metro, TypeScript, and Prettier; the venv, `.env`,
-traces, and eval output are gitignored.
+Yes, and the tools are most of the reason: on the pairs where the user's own
+change demonstrably worked, a keyword table gets the direction right 26% of the
+time, the same model without tools 48%, and with history to read 74%. The
+[full results](#results) and the ladder of arms that isolates each cause are
+below; the short version is that retrieval buys more than reading does.
+
+A research harness, not a feature. No UI, no app integration, and it never
+writes to the database — one test greps the whole package for write verbs to
+keep it that way. It reads [Dial](https://github.com/colecharb/dial)'s Supabase
+instance at exactly the app's own privilege level and vendors into that repo as
+a submodule at `internal/brew-agent`.
 
 ## Setup
 
 ```bash
-cd internal/brew-agent
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 cp .env.example .env      # then fill it in
@@ -25,7 +32,8 @@ real account, and an Anthropic API key.
 .venv/bin/python -m brew_agent.eval.run --n 24
 ```
 
-It prints one row per arm:
+It prints one row per arm — shape shown here, real numbers under
+[Results](#results):
 
 ```
 All sampled pairs
@@ -85,8 +93,11 @@ of the same coffee by the same user, the later brew is what that user decided to
 change. Hold it out, hand the agent the earlier brew and its tasting notes, and
 compare.
 
-**372 pairs** survive the filter chain over the seed dump; **367** after
-redaction. Each filter is counted and printed, so nothing is dropped silently.
+**372 pairs** survive the filter chain over the committed seed dump; **367**
+after redaction. The recorded runs go against the live database, which has grown
+since — the funnel under [Results](#results) is the same chain over 876 brews and
+ends at 439. Either way each filter is counted and printed, so nothing is dropped
+silently.
 
 Three decisions that the data forced:
 
@@ -202,7 +213,7 @@ That third row is the whole reason for the labels. Transferability is a property
 of the *parameter*, not the setup: 92°C is 92°C on anyone's kettle, while 500 on
 a Z1 means nothing on an EK43. A relaxed result handed over unlabelled is how a
 stranger's grind number gets read off the wrong dial — and `agent`'s current
-wrong-direction rate is 2 in 63, which is what that would spend.
+wrong-direction rate is 7 in 63, which is what that would spend.
 
 Coverage says which groups will actually carry the run: same coffee on any gear
 reaches **72 of 100** pairs (median 6 rows), same setup on any coffee **21**. So
@@ -249,6 +260,82 @@ as an abstention and is indistinguishable from having had no opinion — a silen
 loss on 15 of the 367 pairs, all of them dials between 4 and 10. Where a
 percentage rounds away the step is now the smallest increment the dial can
 express; where 5% is expressible it is still exactly 5%.
+
+## Results
+
+Run `20260811T030004Z`. 100 pairs, sampled round-robin across 11 users from the
+439 eligible after redaction (876 brews → 715 consecutive → 590 with notes → 564
+same grinder → 470 same brewer → 459 both rated and numerically comparable → 448
+something changed → 439 surviving redaction). `claude-haiku-4-5` on every model
+arm, no effort parameter, labelling pass on.
+
+```
+All sampled pairs
+arm                 n |   ok  wrong  quiet  elsew    dir |     magnitude |   when improved |  held  err
+-------------------------------------------------------------------------------------------------------
+rules             100 |   15      8     40      0   24% |    9/15   60% |      7/26   27% |    70    0
+no_tools          100 |   21     19     23      2   33% |   12/21   57% |     11/26   42% |    39    0
+agent             100 |   31      7     25     11   49% |   23/31   74% |     18/26   69% |    27    0
+agent_community   100 |   32      3     28     12   51% |   27/32   84% |     21/26   81% |    26    0
+
+Pairs whose note describes a taste problem
+arm                 n |   ok  wrong  quiet  elsew    dir |     magnitude |   when improved |  held  err
+-------------------------------------------------------------------------------------------------------
+rules              52 |   12      7     17      0   33% |    6/12   50% |      6/23   26% |    27    0
+no_tools           52 |   17     13      6      1   47% |    8/17   47% |     11/23   48% |     7    0
+agent              52 |   25      5      6      3   69% |   17/25   68% |     17/23   74% |     5    0
+agent_community    52 |   26      2      8      6   72% |   21/26   81% |     20/23   87% |     3    0
+
+What each arm bet on
+  rules            grind_setting 30, none 70
+  no_tools         grind_setting 55, none 42, water_temp 3
+  agent            coffee_weight 3, grind_setting 48, none 37, time 10, water_temp 2
+  agent_community  coffee_weight 2, grind_setting 43, none 32, time 20, water_temp 3
+```
+
+**Retrieval is the rung that pays.** `no_tools` → `agent` is +16 points of
+direction (33% → 49%) and +27 on the headline (42% → 69%), the largest gap on the
+ladder by a wide margin. Reading the note better is not what closes it: the model
+is identical across those two arms and only the history is added.
+
+**The gain is not that the model speaks more often — it is that it stops being
+wrong.** `no_tools` is the *least* quiet arm on diagnosable pairs (6 abstentions
+against `rules`' 17) and buys that confidence badly: 13 wrong directions out of
+36, close to a coin flip on the ones it commits to. `agent` speaks on almost the
+same number of pairs and halves the errors to 5. A grind dial has no shared
+orientation across 34 grinders, so an arm without history is guessing which way
+the number runs; an arm with it can look.
+
+**Community data is a precision play, not a recall one.** `agent_community` adds
+one correct call over `agent` — well inside noise — but cuts wrong directions
+from 7 to 3 and lifts magnitude accuracy from 74% to 84%. This is what the rung
+was designed to test and the number to watch was `wrong`, not `ok`: strangers'
+brews narrow *how far to move* rather than revealing new problems. It also
+carries a real cost, visible in the levers row — it bets on `time` 20 times
+against `agent`'s 10, and time is scored at 17%.
+
+**Two things are still not working.** Ratio and time are near zero for every arm
+(`agent_community` manages 2/30 and 15/88), and temperature is indistinguishable
+from noise at n=14. The honest reading is that this harness measures grind and
+gestures at everything else; the non-grind levers need either more pairs or a
+scoring model that does not treat one held-out brew as ground truth for
+parameters users change casually.
+
+**Stability.** The preceding run (`20260810T202320Z`, same config, same arms)
+put the ladder at 24 / 33 / 41 / 46% direction against this run's 24 / 33 / 49 /
+51%. `rules` is deterministic and reproduced exactly; the ordering of the four
+arms held; the absolute gaps moved by up to 8 points. Read the ladder, not the
+decimals — at n=100 with no confidence intervals, only the ordering and the
+large gaps are load-bearing, and the +1 correct call from the community rung is
+not.
+
+One caveat worth stating plainly: `agent_community` called `get_community_brews`
+on only 40 of the 100 pairs, and the tight group (same coffee, same setup, someone
+else) returned rows on none of them — the retrieved evidence was 21 pairs of
+same-coffee-other-setup and a single same-setup-other-coffee. So the community
+result above is what a mostly-unused fourth tool bought. Whether forcing the call
+helps or just adds the transferability trap the labels exist to prevent is the
+next thing to measure, not something these numbers answer.
 
 ## Tools
 
