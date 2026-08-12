@@ -1,23 +1,33 @@
 """Parse `supabase/seed.sql` into `Brew` objects for offline tests.
 
-The repo's seed dump is a real pg_dump of the dev database, so the pair
-extraction can be exercised against genuine data shapes — non-numeric grind
-settings, unrated brews, empty notes, mixed grind scales — without a database
-or any network access.
+The seed dump is a real pg_dump of the dev database, so the pair extraction can
+be exercised against genuine data shapes — non-numeric grind settings, unrated
+brews, empty notes, mixed grind scales — without a database or any network
+access.
+
+The dump is not part of this package. It lives in the `dial` app repo, which is
+where this package sits as a submodule, so the default path finds it there. Set
+`BREW_AGENT_SEED_SQL` to point somewhere else; without it, the tests that need
+real data skip.
 
 Test-only. The agent never reads this file; it goes through `db.py`.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 from brew_agent.models import Brew
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SEED_SQL = REPO_ROOT / "supabase" / "seed.sql"
+DEFAULT_SEED_SQL = Path(__file__).resolve().parents[3] / "supabase" / "seed.sql"
+
+
+def seed_sql_path() -> Path:
+    override = os.environ.get("BREW_AGENT_SEED_SQL")
+    return Path(override) if override else DEFAULT_SEED_SQL
 
 
 def _parse_table(sql: str, table: str) -> list[dict[str, Any]]:
@@ -94,8 +104,15 @@ def _num(value: Any) -> float | None:
 
 
 def load_seed_brews() -> list[Brew]:
-    """Every non-hidden brew in the seed dump, with `coffee_id` resolved."""
-    sql = SEED_SQL.read_text()
+    """Every non-hidden brew in the seed dump, with `coffee_id` resolved.
+
+    Raises `FileNotFoundError` when the dump is not on disk, which the
+    `seed_brews` fixture turns into a skip.
+    """
+    path = seed_sql_path()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    sql = path.read_text()
     bags = {row["id"]: row for row in _parse_table(sql, "profile_coffee")}
     names = {
         table: {row["id"]: row["name"] for row in _parse_table(sql, table)}

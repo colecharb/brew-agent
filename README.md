@@ -361,8 +361,18 @@ takes several runs at once to compare models over the same pairs.
 .venv/bin/python -m pytest
 ```
 
-No network, no API key, no database. Pair extraction and scoring run against the
-committed `supabase/seed.sql`, with the funnel counts pinned so a drift in the
-filter chain fails loudly instead of quietly measuring a different population.
-The agent loop is exercised with a scripted client, and one test greps the whole
+No network, no API key, no database. Pair extraction and scoring run against
+`supabase/seed.sql`, with the funnel counts pinned so a drift in the filter
+chain fails loudly instead of quietly measuring a different population. The
+agent loop is exercised with a scripted client, and one test greps the whole
 package for database write verbs.
+
+The seed dump is not part of this repository — it is a pg_dump of the dev
+database and lives in the `dial` app repo, which is where this package sits as a
+submodule. The default path finds it there. Elsewhere, point at your own dump:
+
+```bash
+BREW_AGENT_SEED_SQL=/path/to/seed.sql .venv/bin/python -m pytest
+```
+
+Without it the thirty-five tests that need real data skip, and the rest run.
