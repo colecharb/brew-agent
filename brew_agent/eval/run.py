@@ -234,7 +234,7 @@ def _print_table(title: str, scores: Mapping[str, ArmScore]) -> None:
     header = (
         f"{'arm':<10} {'n':>4} | {'ok':>4} {'wrong':>6} {'quiet':>6} {'elsew':>6} "
         f"{'dir':>6} | {'magnitude':>13} | {'when improved':>15} | "
-        f"{'held':>5} {'err':>4}"
+        f"{'held':>5} {'fmove':>6} {'chold':>6} {'err':>4}"
     )
     print(f"\n{title}")
     print(header)
@@ -249,7 +249,8 @@ def _print_table(title: str, scores: Mapping[str, ArmScore]) -> None:
             f"{_pct(arm.magnitude_rate)} | "
             f"{_fraction(arm.grind_when_improved.correct, arm.grind_when_improved.considered):>9} "
             f"{_pct(arm.headline)} | "
-            f"{arm.recommended_nothing:>5} {arm.errors:>4}"
+            f"{arm.recommended_nothing:>5} {arm.grind.false_moves:>6} "
+            f"{arm.grind.correct_holds:>6} {arm.errors:>4}"
         )
 
 
