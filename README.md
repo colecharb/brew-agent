@@ -7,7 +7,7 @@ Yes, and the tools are most of the reason: on the pairs where the user's own
 change demonstrably worked, a keyword table gets the direction right 26% of the
 time, the same model without tools 48%, and with history to read 74%. The
 [full results](#results) and the ladder of arms that isolates each cause are
-below; the short version is that retrieval buys more than reading does.
+below; the short version is that **retrieval buys more than reading does.**
 
 A research harness. No UI, no app integration, and it never writes to the
 database — one test greps the whole package for write verbs to keep it that way.
