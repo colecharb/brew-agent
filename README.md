@@ -1,6 +1,6 @@
 # brew-agent
 
-Internal experiment. Does an LLM with three read-only tools recover the brewing
+Does an LLM with three read-only tools recover the brewing
 adjustments Dial's users actually made, better than a static rule table does?
 
 Yes, and the tools are most of the reason: on the pairs where the user's own
