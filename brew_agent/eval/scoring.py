@@ -218,6 +218,17 @@ class Metric:
             "accuracy": self.accuracy,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Metric":
+        """Inverse of `to_dict`. `considered` and `accuracy` are derived, not stored."""
+        return cls(
+            correct=d["correct"],
+            wrong=d["wrong_direction"],
+            abstained=d["abstained"],
+            false_moves=d["false_moves"],
+            correct_holds=d["correct_holds"],
+        )
+
 
 @dataclass
 class ArmScore:
@@ -272,6 +283,26 @@ class ArmScore:
             "levers": dict(sorted(self.levers.items())),
             "errors": self.errors,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ArmScore":
+        """Inverse of `to_dict`, so a run written to `evals/output/*.json` can be
+        reloaded and reported on without re-running the eval."""
+        return cls(
+            arm=d["arm"],
+            n=d["n"],
+            grind=Metric.from_dict(d["grind"]),
+            grind_when_improved=Metric.from_dict(d["grind_when_rating_improved"]),
+            ratio=Metric.from_dict(d["ratio"]),
+            time=Metric.from_dict(d["time"]),
+            temp=Metric.from_dict(d["temp"]),
+            magnitude_considered=d["magnitude"]["considered"],
+            magnitude_hits=d["magnitude"]["hits"],
+            recommended_nothing=d["recommended_nothing"],
+            quiet_elsewhere=d["quiet_elsewhere"],
+            levers=dict(d["levers"]),
+            errors=d["errors"],
+        )
 
 
 def aggregate(arm: str, scores: Iterable[PairScore]) -> ArmScore:

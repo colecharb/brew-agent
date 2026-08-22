@@ -295,6 +295,19 @@ def print_report(result: dict) -> None:
     )
     print("                     change raised the rating. This is the headline number.")
     print("held                 recommended no change to anything.")
+    print(
+        "fmove / chold        of the pairs where the user held the grind steady, "
+        "how many times the"
+    )
+    print(
+        "                     arm proposed a change anyway (fmove, a false "
+        "move) versus agreed by"
+    )
+    print(
+        "                     proposing nothing (chold, a correct hold). "
+        "fmove / (fmove + chold)"
+    )
+    print("                     is the false-move rate.")
 
     # `rules` and `classify` can only ever bet on the grind, so a spread here
     # that is not all grind_setting/none belongs to an arm that chose its lever.
@@ -313,6 +326,39 @@ def print_report(result: dict) -> None:
     print(f"\nrun {result['run_id']}")
     print(f"  results {result['output_path']}")
     print(f"  traces  {result['trace_dir']}")
+
+
+def load_report(run: str | Path) -> dict:
+    """Reload a run written by `run_eval` into the shape `print_report` expects.
+
+    `run` may be a path to the json file, or a bare run id (looked up under
+    `OUTPUT_DIR`) — the same id `main` prints as "run <id>" when the eval
+    finishes.
+    """
+    path = Path(run)
+    if not path.exists():
+        path = OUTPUT_DIR / f"{path.stem}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"no run output found for {run!r}")
+
+    data = json.loads(path.read_text())
+    return {
+        "run_id": data["run_id"],
+        "stats": PairStats(**data["funnel"]),
+        "scores": {name: ArmScore.from_dict(d) for name, d in data["arms"].items()},
+        "diagnosable": {
+            name: ArmScore.from_dict(d)
+            for name, d in data.get("arms_diagnosable_only", {}).items()
+        },
+        "evidence_not_verbatim": data.get("evidence_not_verbatim", {}),
+        "output_path": path,
+        "trace_dir": TRACE_DIR / data["run_id"],
+    }
+
+
+def print_report_for_run(run: str | Path) -> None:
+    """`print_report`, but for a run already on disk instead of one just run."""
+    print_report(load_report(run))
 
 
 def _write_trace(
@@ -369,6 +415,15 @@ def _label_notes(db: SupportsBrewReads) -> Mapping[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--show",
+        metavar="RUN",
+        help=(
+            "print the report for a previous run instead of running a new "
+            "eval. RUN is a run id (e.g. 20260811T030004Z) or a path to its "
+            "json file under evals/output/"
+        ),
+    )
     parser.add_argument("--n", type=int, default=24, help="pairs to sample")
     parser.add_argument(
         "--arms",
@@ -420,6 +475,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.show:
+        try:
+            print_report_for_run(args.show)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
 
     seen: list[str] = []
     for name in (a.strip() for a in args.arms.split(",")):
