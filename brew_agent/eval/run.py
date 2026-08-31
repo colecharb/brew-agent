@@ -58,26 +58,29 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
     if not any(name in NEEDS_API_KEY for name in names):
         return runners
 
-    import anthropic
+    from ..providers import connect
 
     config = ModelConfig.from_env()
-    client = anthropic.Anthropic(api_key=config.api_key)
-    print(f"model: {config.model} (effort={config.effort or 'default'})")
+    provider = connect(config)
+    print(
+        f"model: {config.model} on {config.provider} "
+        f"(effort={config.effort or 'default'})"
+    )
 
     if "classify" in names:
-        classifier = ClassifyBaseline(client, config)
+        classifier = ClassifyBaseline(provider, config)
         runners.append(
             Runner("classify", lambda p: classifier.run(p.before, p.complaint))
         )
     if "no_tools" in names:
-        baseline = NoToolsBaseline(client, config)
+        baseline = NoToolsBaseline(provider, config)
         runners.append(
             Runner("no_tools", lambda p: baseline.run(p.before, p.complaint))
         )
     if "agent" in names:
         from ..agent import BrewAgent
 
-        agent = BrewAgent(client, config, Toolbox(db))
+        agent = BrewAgent(provider, config, Toolbox(db))
         runners.append(Runner("agent", lambda p: agent.run(p.before, p.complaint)))
     if "agent_community" in names:
         from ..agent import BrewAgent
@@ -87,7 +90,7 @@ def build_runners(names: list[str], db: SupportsBrewReads) -> list[Runner]:
         # by what they are comparable on. The gap against `agent` is what the
         # community's history is worth.
         community = BrewAgent(
-            client,
+            provider,
             config,
             Toolbox(db),
             tools=COMMUNITY_TOOLS,
@@ -402,15 +405,22 @@ def _write_trace(
 
 
 def _label_notes(db: SupportsBrewReads) -> Mapping[str, Any]:
-    """Run (or reuse) the cached model labelling pass over every note."""
-    import anthropic
+    """Run (or reuse) the cached model labelling pass over every note.
 
+    `BREW_AGENT_LABEL_MODEL` runs it on something other than the arms' model.
+    The labeller gates every arm identically rather than competing in the
+    ladder, so it is the one place where a different model changes accuracy
+    without changing what the rungs mean — see `labels.label_brews`.
+    """
+    from ..providers import connect
     from .labels import label_brews
 
-    config = ModelConfig.from_env()
-    client = anthropic.Anthropic(api_key=config.api_key)
-    print(f"labelling notes with {config.model} (cached in {LABEL_CACHE})")
-    return label_brews(client, config, db.fetch_all_brews(), LABEL_CACHE)
+    config = ModelConfig.from_env(os.environ.get("BREW_AGENT_LABEL_MODEL"))
+    print(
+        f"labelling notes with {config.model} on {config.provider} "
+        f"(cached in {LABEL_CACHE})"
+    )
+    return label_brews(connect(config), config, db.fetch_all_brews(), LABEL_CACHE)
 
 
 def main(argv: list[str] | None = None) -> int:

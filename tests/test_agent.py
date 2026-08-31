@@ -8,6 +8,7 @@ import pytest
 from brew_agent.agent import BrewAgent
 from brew_agent.config import ModelConfig
 from brew_agent.models import Brew
+from brew_agent.providers import AnthropicProvider
 from brew_agent.tools import ALL_TOOLS, SUBMIT_TOOL, Toolbox
 
 
@@ -134,12 +135,14 @@ SUBMIT_INPUT = {
 def make_agent(script, explode=False, max_iterations=6):
     db = FakeDatabase(explode=explode)
     config = ModelConfig(
+        provider="anthropic",
         api_key="test",
         model="claude-opus-5",
         effort=None,
         max_iterations=max_iterations,
+        max_tokens=16000,
     )
-    agent = BrewAgent(FakeClient(script), config, Toolbox(db))
+    agent = BrewAgent(AnthropicProvider(FakeClient(script)), config, Toolbox(db))
     return agent, db
 
 
@@ -209,7 +212,7 @@ def test_hitting_the_cap_still_produces_an_answer():
     assert result.trace["hit_cap"] is True
     assert result.recommendation.grind_setting == "485"
     # The forced call pins tool_choice so an answer is unavoidable.
-    assert agent._client.messages.calls[-1]["tool_choice"] == {
+    assert agent._provider.client.messages.calls[-1]["tool_choice"] == {
         "type": "tool",
         "name": SUBMIT_TOOL,
     }
@@ -225,7 +228,7 @@ def test_prose_reply_is_nudged_rather_than_discarded():
     result = agent.run(a_brew(), "sour")
 
     assert result.recommendation.grind_setting == "485"
-    nudge = agent._client.messages.calls[1]["messages"][-1]
+    nudge = agent._provider.client.messages.calls[1]["messages"][-1]
     assert SUBMIT_TOOL in nudge["content"]
 
 
@@ -237,7 +240,7 @@ def test_tool_failure_is_returned_to_the_model_not_raised():
     agent, _ = make_agent(script, explode=True)
     result = agent.run(a_brew(), "sour")
 
-    tool_result = agent._client.messages.calls[1]["messages"][-1]["content"][0]
+    tool_result = agent._provider.client.messages.calls[1]["messages"][-1]["content"][0]
     assert tool_result["is_error"] is True
     assert "connection reset" in tool_result["content"]
     # The run still finishes rather than taking the whole eval down.
@@ -259,7 +262,7 @@ def test_api_failure_does_not_take_down_the_run():
             raise RuntimeError("503 overloaded")
 
     agent, _ = make_agent([])
-    agent._client.messages = Exploding()
+    agent._provider.client.messages = Exploding()
     result = agent.run(a_brew(), "sour")
     assert "503 overloaded" in str(result.recommendation.error)
 
@@ -270,7 +273,7 @@ def test_agent_is_not_handed_the_brew_parameters():
     agent, _ = make_agent(script)
     agent.run(a_brew(grind="500"), "sour and thin")
 
-    opening = agent._client.messages.calls[0]["messages"][0]["content"]
+    opening = agent._provider.client.messages.calls[0]["messages"][0]["content"]
     assert "brew-1" in opening
     assert "sour and thin" in opening
     assert "500" not in opening
@@ -293,7 +296,7 @@ def test_sampling_parameters_are_never_sent():
     script = [FakeResponse([ToolUseBlock(SUBMIT_TOOL, SUBMIT_INPUT)])]
     agent, _ = make_agent(script)
     agent.run(a_brew(), "sour")
-    sent = agent._client.messages.calls[0]
+    sent = agent._provider.client.messages.calls[0]
     for banned in ("temperature", "top_p", "top_k"):
         assert banned not in sent
 

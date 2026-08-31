@@ -7,16 +7,26 @@ from dataclasses import dataclass, field
 import pytest
 
 from brew_agent.config import ModelConfig
+from brew_agent.eval import labels as labels_module
 from brew_agent.eval.labels import (
     LABEL_TOOL,
     NoteLabel,
-    label_brews,
     load_cache,
     quote_spans,
     save_cache,
 )
 from brew_agent.eval.pairs import REDACT, build_pairs, redact_leaks
 from brew_agent.models import Brew
+from brew_agent.providers import AnthropicProvider
+
+
+def label_brews(client, *args, **kwargs):
+    """The real pass, given a scripted client the way a provider gives it one.
+
+    What this file is about is the cache and the concurrency, so the provider
+    is wrapped here once rather than at every call site.
+    """
+    return labels_module.label_brews(AnthropicProvider(client), *args, **kwargs)
 
 
 @dataclass
@@ -59,7 +69,12 @@ class FakeClient:
 
 
 CONFIG = ModelConfig(
-    api_key="test", model="claude-opus-5", effort=None, max_iterations=6
+    provider="anthropic",
+    api_key="test",
+    model="claude-opus-5",
+    effort=None,
+    max_iterations=6,
+    max_tokens=16000,
 )
 
 CLEAN = {"states_adjustment": False, "adjustment_quotes": [], "has_complaint": True}

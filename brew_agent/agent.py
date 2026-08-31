@@ -21,17 +21,16 @@ import json
 import time
 from typing import Any
 
-import anthropic
-
-from .baselines import (
-    ArmResult,
-    build_prompt,
-    call_model,
-    extract_recommendation,
-    usage_of,
-)
+from .baselines import ArmResult, extract_recommendation
 from .config import ModelConfig
 from .models import Brew, Recommendation
+from .providers import (
+    ModelResponse,
+    Provider,
+    assistant_message,
+    tool_results_message,
+    user_message,
+)
 from .tools import ALL_TOOLS, SUBMIT_RECOMMENDATION, SUBMIT_TOOL, SYSTEM_PROMPT, Toolbox
 
 
@@ -40,7 +39,7 @@ class BrewAgent:
 
     def __init__(
         self,
-        client: anthropic.Anthropic,
+        provider: Provider,
         config: ModelConfig,
         toolbox: Toolbox,
         tools: list[dict[str, Any]] | None = None,
@@ -53,7 +52,7 @@ class BrewAgent:
         the same loop one more tool, rather than by editing the arm every other
         run was measured against.
         """
-        self._client = client
+        self._provider = provider
         self._config = config
         self._toolbox = toolbox
         self._tools = tools if tools is not None else ALL_TOOLS
@@ -63,10 +62,11 @@ class BrewAgent:
     def run(self, brew: Brew, complaint: str) -> ArmResult:
         started = time.monotonic()
         messages: list[dict[str, Any]] = [
-            {"role": "user", "content": self._opening(brew, complaint)}
+            user_message(self._opening(brew, complaint))
         ]
         trace: dict[str, Any] = {
             "arm": self._name,
+            "provider": self._config.provider,
             "model": self._config.model,
             "effort": self._config.effort,
             "brew_id": brew.id,
@@ -82,8 +82,7 @@ class BrewAgent:
         recommendation: Recommendation | None = None
         for iteration in range(1, self._config.max_iterations + 1):
             try:
-                response = call_model(
-                    self._client,
+                response = self._provider.complete(
                     self._config,
                     system=self._system,
                     messages=messages,
@@ -98,7 +97,7 @@ class BrewAgent:
             step: dict[str, Any] = {
                 "n": iteration,
                 "stop_reason": response.stop_reason,
-                "assistant_text": _text_of(response),
+                "assistant_text": response.text,
                 "tool_calls": [],
             }
             trace["iterations"].append(step)
@@ -107,7 +106,7 @@ class BrewAgent:
                 recommendation = Recommendation(error="model declined the request")
                 break
 
-            calls = [b for b in response.content if b.type == "tool_use"]
+            calls = response.tool_calls
             submitted = next((c for c in calls if c.name == SUBMIT_TOOL), None)
             if submitted:
                 step["tool_calls"].append(
@@ -119,21 +118,18 @@ class BrewAgent:
             if not calls:
                 # Answered in prose despite being told not to. Nudge once rather
                 # than throwing the pair away.
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append(assistant_message(response))
                 messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Call {SUBMIT_TOOL} with your answer. Do not reply "
-                            f"in prose."
-                        ),
-                    }
+                    user_message(
+                        f"Call {SUBMIT_TOOL} with your answer. Do not reply "
+                        f"in prose."
+                    )
                 )
                 continue
 
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append(assistant_message(response))
             messages.append(
-                {"role": "user", "content": self._run_tools(calls, step, brew)}
+                tool_results_message(self._run_tools(calls, step, brew))
             )
 
         if recommendation is None:
@@ -163,6 +159,11 @@ class BrewAgent:
     ) -> list[dict]:
         """Execute every tool the model asked for and build the result blocks.
 
+        The blocks are neutral — `{id, content, is_error}` — and the provider
+        renders them, because the two wires disagree about where a tool result
+        goes: Anthropic files it under the user's turn, Cohere gives it a role
+        of its own.
+
         The cutoff is taken from the brew being diagnosed rather than passed in
         separately, so it cannot drift out of sync with the question being
         asked. The model has no say in it — it is not a tool parameter.
@@ -178,8 +179,7 @@ class BrewAgent:
             step["tool_calls"].append(tool_trace)
             blocks.append(
                 {
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
+                    "id": call.id,
                     "content": json.dumps(payload, default=str),
                     "is_error": bool(tool_trace["error"]),
                 }
@@ -191,17 +191,13 @@ class BrewAgent:
     ) -> Recommendation:
         """Out of iterations: demand the answer with the tools taken away."""
         messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "You are out of investigation steps. Answer now with "
-                    f"{SUBMIT_TOOL}, using what you already have."
-                ),
-            }
+            user_message(
+                "You are out of investigation steps. Answer now with "
+                f"{SUBMIT_TOOL}, using what you already have."
+            )
         )
         try:
-            response = call_model(
-                self._client,
+            response = self._provider.complete(
                 self._config,
                 system=self._system,
                 messages=messages,
@@ -216,25 +212,17 @@ class BrewAgent:
             {
                 "n": len(trace["iterations"]) + 1,
                 "stop_reason": response.stop_reason,
-                "assistant_text": _text_of(response),
+                "assistant_text": response.text,
                 "forced_submit": True,
                 "tool_calls": [
                     {"tool": SUBMIT_TOOL, "arguments": block.input}
-                    for block in response.content
-                    if block.type == "tool_use"
+                    for block in response.tool_calls
                 ],
             }
         )
         return extract_recommendation(response)
 
     @staticmethod
-    def _accumulate(trace: dict[str, Any], response: Any) -> None:
-        usage = usage_of(response)
-        for key, value in usage.items():
+    def _accumulate(trace: dict[str, Any], response: ModelResponse) -> None:
+        for key, value in response.usage.items():
             trace["usage"][key] = trace["usage"].get(key, 0) + value
-
-
-def _text_of(response: Any) -> str:
-    return "".join(
-        block.text for block in response.content if block.type == "text"
-    ).strip()

@@ -17,6 +17,7 @@ from brew_agent.baselines import (
 )
 from brew_agent.config import ModelConfig
 from brew_agent.models import Brew
+from brew_agent.providers import AnthropicProvider
 
 
 @dataclass
@@ -65,7 +66,12 @@ class FakeClient:
 
 
 CONFIG = ModelConfig(
-    api_key="test", model="claude-opus-5", effort=None, max_iterations=6
+    provider="anthropic",
+    api_key="test",
+    model="claude-opus-5",
+    effort=None,
+    max_iterations=6,
+    max_tokens=16000,
 )
 
 
@@ -98,7 +104,7 @@ def brew(grind="500", temp=93.0):
 
 def classify(verdict, note="tasted a bit off", evidence="the words", **kw):
     client = FakeClient(verdict_response(verdict, evidence))
-    result = ClassifyBaseline(client, CONFIG).run(brew(**kw), note)
+    result = ClassifyBaseline(AnthropicProvider(client), CONFIG).run(brew(**kw), note)
     return client, result
 
 
@@ -213,19 +219,19 @@ class TestTheBrief:
 class TestDegradation:
     def test_an_api_error_scores_as_a_miss_rather_than_crashing(self):
         client = FakeClient(explode=True)
-        result = ClassifyBaseline(client, CONFIG).run(brew(), "sour")
+        result = ClassifyBaseline(AnthropicProvider(client), CONFIG).run(brew(), "sour")
         assert "503 overloaded" in str(result.recommendation.error)
         assert result.recommendation.changes_nothing
 
     def test_a_refusal_is_recorded(self):
         client = FakeClient(FakeResponse([], stop_reason="refusal"))
-        result = ClassifyBaseline(client, CONFIG).run(brew(), "sour")
+        result = ClassifyBaseline(AnthropicProvider(client), CONFIG).run(brew(), "sour")
         assert result.recommendation.error
         assert result.trace["verdict"] is None
 
     def test_a_prose_reply_is_recorded_as_an_error(self):
         client = FakeClient(FakeResponse([TextBlock("Sounds under-extracted.")]))
-        result = ClassifyBaseline(client, CONFIG).run(brew(), "sour")
+        result = ClassifyBaseline(AnthropicProvider(client), CONFIG).run(brew(), "sour")
         assert CLASSIFY_TOOL in str(result.recommendation.error)
 
     def test_non_numeric_grind_leaves_the_dial_alone(self):

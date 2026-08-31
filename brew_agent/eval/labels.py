@@ -34,9 +34,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..baselines import call_model
 from ..config import ModelConfig
 from ..models import Brew
+from ..providers import Provider, user_message
 
 LABEL_TOOL = "label_note"
 
@@ -132,7 +132,7 @@ def save_cache(path: Path, labels: dict[str, NoteLabel]) -> None:
 
 
 def label_brews(
-    client: Any,
+    provider: Provider,
     config: ModelConfig,
     brews: Iterable[Brew],
     cache_path: Path,
@@ -149,6 +149,14 @@ def label_brews(
     piece whose mistakes are *not* symmetric across arms, since a leak the
     labeller misses only helps the arms that can read prose. Parallelism costs
     nothing in quality; trimming the thinking might.
+
+    For the same reason this is the one component that may run on a different
+    model from the arms — `BREW_AGENT_LABEL_MODEL`. The arms have to share one
+    model or the ladder measures the swap instead of the capability; the
+    labeller sits outside the ladder and gates every arm identically, so
+    raising it buys accuracy without skewing anything. The cache is keyed by
+    brew id and not by model, so switching models does not re-label a corpus:
+    clear `labels/` if that is what you meant.
     """
     labels = load_cache(cache_path)
     pending = [b for b in brews if b.notes.strip() and b.id not in labels]
@@ -162,7 +170,7 @@ def label_brews(
         # `_label_one` already fails closed; this is the backstop that keeps a
         # single unexpected error from aborting a 700-note run.
         try:
-            return brew.id, _label_one(client, config, brew.notes)
+            return brew.id, _label_one(provider, config, brew.notes)
         except Exception:
             return brew.id, NoteLabel(states_adjustment=True, has_complaint=True)
 
@@ -187,13 +195,12 @@ def label_brews(
     return labels
 
 
-def _label_one(client: Any, config: ModelConfig, notes: str) -> NoteLabel:
+def _label_one(provider: Provider, config: ModelConfig, notes: str) -> NoteLabel:
     try:
-        response = call_model(
-            client,
+        response = provider.complete(
             config,
             system=SYSTEM,
-            messages=[{"role": "user", "content": notes}],
+            messages=[user_message(notes)],
             tools=[LABEL_SCHEMA],
             force_tool=LABEL_TOOL,
         )
@@ -204,8 +211,8 @@ def _label_one(client: Any, config: ModelConfig, notes: str) -> NoteLabel:
         # admitted on the strength of a failed call.
         return NoteLabel(states_adjustment=True, has_complaint=True)
 
-    for block in response.content:
-        if block.type == "tool_use" and block.name == LABEL_TOOL:
+    for block in response.tool_calls:
+        if block.name == LABEL_TOOL:
             return NoteLabel.from_dict(block.input)
     return NoteLabel(states_adjustment=True, has_complaint=True)
 

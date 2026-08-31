@@ -23,34 +23,26 @@ either cause.
 from __future__ import annotations
 
 import re
-import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import anthropic
-
-from .config import MAX_TOKENS, ModelConfig
+from .config import ModelConfig
 from .models import Brew, Recommendation
+from .providers import ModelResponse, Provider, user_message, warn_once
 from .tools import SUBMIT_RECOMMENDATION, SUBMIT_TOOL, SYSTEM_PROMPT, nullable
 
-_warned: set[str] = set()
-_warn_lock = threading.Lock()
-
-
-def warn_once(message: str) -> None:
-    """Print a warning the first time it happens, not once per pair.
-
-    Pairs run concurrently and a model-capability mismatch affects every call
-    equally, so without this the same line would land a few hundred times and
-    bury the results table.
-    """
-    with _warn_lock:
-        if message in _warned:
-            return
-        _warned.add(message)
-    print(f"warning: {message}", file=sys.stderr, flush=True)
+__all__ = [
+    "ArmResult",
+    "ClassifyBaseline",
+    "NoToolsBaseline",
+    "build_prompt",
+    "describe_brew",
+    "evidence_is_verbatim",
+    "extract_recommendation",
+    "run_rules",
+    "warn_once",
+]
 
 
 @dataclass
@@ -305,18 +297,17 @@ class ClassifyBaseline:
     task; the metric stays the metric.
     """
 
-    def __init__(self, client: anthropic.Anthropic, config: ModelConfig) -> None:
-        self._client = client
+    def __init__(self, provider: Provider, config: ModelConfig) -> None:
+        self._provider = provider
         self._config = config
 
     def run(self, brew: Brew, complaint: str) -> ArmResult:
         started = time.monotonic()
         try:
-            response = call_model(
-                self._client,
+            response = self._provider.complete(
                 self._config,
                 system=CLASSIFY_SYSTEM,
-                messages=[{"role": "user", "content": complaint.strip()}],
+                messages=[user_message(complaint.strip())],
                 tools=[CLASSIFY_TASTE],
                 force_tool=CLASSIFY_TOOL,
             )
@@ -344,6 +335,7 @@ class ClassifyBaseline:
             recommendation=rec,
             trace={
                 "arm": "classify",
+                "provider": self._config.provider,
                 "model": self._config.model,
                 "verdict": verdict,
                 "evidence": evidence,
@@ -351,18 +343,18 @@ class ClassifyBaseline:
                 # note. Scores are unaffected; the trace's account of why is.
                 "evidence_verbatim": evidence_is_verbatim(evidence, complaint),
                 "stop_reason": response.stop_reason,
-                "usage": usage_of(response),
+                "usage": response.usage,
                 "latency_ms": round((time.monotonic() - started) * 1000),
                 "recommendation": rec.to_dict(),
             },
         )
 
 
-def _read_verdict(response: Any) -> tuple[str | None, str]:
+def _read_verdict(response: ModelResponse) -> tuple[str | None, str]:
     if response.stop_reason == "refusal":
         return None, ""
-    for block in response.content:
-        if block.type == "tool_use" and block.name == CLASSIFY_TOOL:
+    for block in response.tool_calls:
+        if block.name == CLASSIFY_TOOL:
             return block.input.get("verdict"), block.input.get("evidence") or ""
     return None, ""
 
@@ -404,16 +396,15 @@ NO_TOOLS_SYSTEM = (
 class NoToolsBaseline:
     """A single model call with the brew and the complaint, and nothing else."""
 
-    def __init__(self, client: anthropic.Anthropic, config: ModelConfig) -> None:
-        self._client = client
+    def __init__(self, provider: Provider, config: ModelConfig) -> None:
+        self._provider = provider
         self._config = config
 
     def run(self, brew: Brew, complaint: str) -> ArmResult:
         started = time.monotonic()
-        messages = [{"role": "user", "content": build_prompt(brew, complaint)}]
+        messages = [user_message(build_prompt(brew, complaint))]
         try:
-            response = call_model(
-                self._client,
+            response = self._provider.complete(
                 self._config,
                 system=NO_TOOLS_SYSTEM,
                 messages=messages,
@@ -431,85 +422,30 @@ class NoToolsBaseline:
             recommendation=rec,
             trace={
                 "arm": "no_tools",
+                "provider": self._config.provider,
                 "model": self._config.model,
                 "stop_reason": response.stop_reason,
-                "usage": usage_of(response),
+                "usage": response.usage,
                 "latency_ms": round((time.monotonic() - started) * 1000),
                 "recommendation": rec.to_dict(),
             },
         )
 
 
-# --- shared model plumbing -------------------------------------------------
+# --- shared answer plumbing ------------------------------------------------
+#
+# The call itself lives in `providers.py`. What is left here is reading an
+# answer out of the normalised response, which is the same job whichever vendor
+# produced it.
 
 
-def call_model(
-    client: anthropic.Anthropic,
-    config: ModelConfig,
-    system: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    force_tool: str | None = None,
-) -> Any:
-    """One Messages call.
-
-    Claude Opus 5 rejects `temperature`/`top_p`/`top_k`, so behaviour is steered
-    by prompt and `effort` only. Thinking is on by default and `max_tokens` caps
-    thinking plus response together, hence the generous ceiling in config.
-    """
-    kwargs: dict[str, Any] = {
-        "model": config.model,
-        "max_tokens": MAX_TOKENS,
-        "system": system,
-        "messages": messages,
-        "tools": tools,
-    }
-    if config.effort:
-        kwargs["output_config"] = {"effort": config.effort}
-    if force_tool:
-        kwargs["tool_choice"] = {"type": "tool", "name": force_tool}
-
-    try:
-        return client.messages.create(**kwargs)
-    except anthropic.BadRequestError as exc:
-        detail = str(exc).lower()
-        # Forcing a specific tool is not accepted in every model/thinking
-        # combination. Losing the forcing is survivable — the prompt already
-        # asks for the tool — so retry once rather than failing the call.
-        if force_tool and "tool_choice" in detail:
-            kwargs.pop("tool_choice")
-            return client.messages.create(**kwargs)
-        # Smaller models have no effort parameter at all, and rejecting it
-        # would otherwise fail every pair identically. Dropping it is the only
-        # way to run them, so run — but say so, because a run without effort is
-        # not spending the same test-time compute as one with it.
-        if "effort" in detail and "output_config" in kwargs:
-            warn_once(
-                f"{config.model} rejected output_config.effort; continuing "
-                f"without it. This run is not comparable to one that set it."
-            )
-            kwargs.pop("output_config")
-            return client.messages.create(**kwargs)
-        raise
-
-
-def extract_recommendation(response: Any) -> Recommendation:
+def extract_recommendation(response: ModelResponse) -> Recommendation:
     """Pull the submit_recommendation call out of a response."""
     if response.stop_reason == "refusal":
         return Recommendation(error="model declined the request")
-    for block in response.content:
-        if block.type == "tool_use" and block.name == SUBMIT_TOOL:
+    for block in response.tool_calls:
+        if block.name == SUBMIT_TOOL:
             return Recommendation.from_tool_input(block.input)
     return Recommendation(
         error=f"no {SUBMIT_TOOL} call (stop_reason={response.stop_reason})"
     )
-
-
-def usage_of(response: Any) -> dict[str, int]:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return {}
-    return {
-        "input_tokens": getattr(usage, "input_tokens", 0),
-        "output_tokens": getattr(usage, "output_tokens", 0),
-    }
