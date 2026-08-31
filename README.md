@@ -24,7 +24,9 @@ cp .env.example .env      # then fill it in
 ```
 
 `.env` needs the app's Supabase URL and anon key, the email and password of a
-real account, and an Anthropic API key.
+real account, and an API key for whichever provider serves the model — see
+[Which model](#which-model). The default is Cohere's `command-r7b-12-2024`, so
+`COHERE_API_KEY`.
 
 ## The one command
 
@@ -85,6 +87,70 @@ forces strict order.
 
 Useful flags: `--arms rules` (no API key needed), `--label`, `--exclude-leaky`,
 `--include-leaky` (all below).
+
+## Which model
+
+One model per run, by construction: every arm reads the same `ModelConfig`. The
+ladder prices capability — retrieval against no retrieval — and two rungs on
+different models would price the swap instead. `BREW_AGENT_MODEL` sets it and
+the provider follows from the name (`claude-*` Anthropic, `command-*` and
+`north-*` Cohere), with `BREW_AGENT_PROVIDER` for anything the prefixes don't
+know. A name it cannot place fails at startup rather than authenticating
+against the wrong API, which reads like a bad key rather than a bad model name.
+
+The labelling pass is the one exception, via `BREW_AGENT_LABEL_MODEL`. It is
+not a rung: it gates every arm identically, so a better labeller changes the
+population rather than the comparison. It is also the component whose errors
+are *not* symmetric — a leak it misses only helps the arms that can read prose —
+which makes it the last thing to economise on and the first thing to raise.
+
+`brew_agent/providers.py` is the whole of the vendor difference. Three things
+diverge, and each is a place where a naive port is wrong rather than merely
+ugly:
+
+- **Tool arguments.** Cohere returns them as a JSON *string*. Parsed on the way
+  in, and an unparseable one raises rather than degrading to `{}` — five nulls
+  score as an abstention and are indistinguishable from a model with no
+  opinion.
+- **The transcript.** Anthropic wants its own assistant blocks handed back
+  verbatim, because thinking blocks carry signatures that must survive the
+  round trip; Cohere wants the pre-tool reasoning in `tool_plan` and each tool
+  result as its own `role: "tool"` message. The loop keeps a neutral transcript
+  and each provider renders it.
+- **The schema.** Cohere's strict mode has no `anyOf`, which is exactly what
+  `tools.nullable()` emits. Those fields are unwrapped and dropped from
+  `required`, so "leave this alone" is spelled by absence rather than by null.
+  Dropping them from `required` is the load-bearing half: under `strict_tools`
+  a required property must be present, so leaving them in would make every
+  answer set a dose, a yield, a temperature and a time — turning "change one
+  thing" into "change everything", which no scoring column could tell from a
+  recommendation that meant it.
+
+Two smaller asymmetries are handled and worth knowing about. Anthropic can pin
+a *named* tool; Cohere's `tool_choice` only says `REQUIRED`, meaning "some
+tool" — equivalent here because every forced call site offers exactly one, and
+a warning fires the moment that stops being true. And `effort` is Anthropic's
+parameter: on Cohere it is not sent, and a run that set it is not comparable to
+one that did not.
+
+Cost, per 100 pairs, measured against the committed seed dump rather than
+guessed — mean brew row 247 tokens, a typical `agent_community` trajectory
+15k peak context and ~40k billed input:
+
+| model | `agent_community` | four-arm run | labelling ~700 notes |
+|---|---|---|---|
+| `command-r7b-12-2024` | $0.16 | $0.26 | $0.02 |
+| `claude-haiku-4-5` | $4.33 | $7.18 | $0.54 |
+| `command-a-03-2025` | $10.65 | $17.54 | $1.25 |
+
+A full pass over all 439 eligible pairs on R7B, labelling included, is about
+$1.20. The ceiling — every agent pair burning all six iterations with every
+tool returning its full 20 rows — is $3.24.
+
+R7B's ceiling is 4000 output tokens and 128k context, against a 28k worst case
+here, so context is not what limits it. Whether a 7B model holds a six-hop tool
+loop is the open question, and the honest reason to run it: if it does, "with
+history to read" beating "without" stops being a claim about frontier models.
 
 ## How it's evaluated
 
@@ -267,7 +333,9 @@ Run `20260811T030004Z`. 100 pairs, sampled round-robin across 11 users from the
 439 eligible after redaction (876 brews → 715 consecutive → 590 with notes → 564
 same grinder → 470 same brewer → 459 both rated and numerically comparable → 448
 something changed → 439 surviving redaction). `claude-haiku-4-5` on every model
-arm, no effort parameter, labelling pass on.
+arm, no effort parameter, labelling pass on. Every recorded run predates the
+provider shim, so they are all Anthropic; the default is now
+`command-r7b-12-2024`, and nothing below has been re-run on it.
 
 ```
 All sampled pairs
@@ -453,6 +521,13 @@ No network, no API key, no database. Pair extraction and scoring run against
 chain fails loudly instead of quietly measuring a different population. The
 agent loop is exercised with a scripted client, and one test greps the whole
 package for database write verbs.
+
+Both wires are covered the same way. `tests/test_providers.py` asserts on the
+native payload that went out and the normalised object that came back, never on
+the neutral form in between — that being the part that cannot be wrong. A
+mistranslation does not raise, it answers; the arms cannot tell what produced a
+`ModelResponse`, which is the point of the shim and the reason it needs pinning
+rather than trusting.
 
 The seed dump is not part of this repository — it is a pg_dump of the dev
 database and lives in the `dial` app repo, which is where this package sits as a
