@@ -17,7 +17,7 @@ TRACE_DIR = PACKAGE_ROOT / "traces"
 OUTPUT_DIR = PACKAGE_ROOT / "evals" / "output"
 LABEL_CACHE = PACKAGE_ROOT / "labels" / "notes.json"
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "command-r7b-12-2024"
 
 # Which vendor a model name belongs to. Inferred rather than configured because
 # the two always travel together — a Cohere model reached with an Anthropic
